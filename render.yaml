@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: sas-r-converter
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: ALLOWED_ORIGINS
+        value: "*"
