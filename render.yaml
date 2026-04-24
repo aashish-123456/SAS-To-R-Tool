@@ -2,8 +2,10 @@ services:
   - type: web
     name: sas-r-converter
     runtime: docker
-    plan: free
+    plan: starter          # 512 MB → 1 GB RAM; required for R + Python + dplyr
     autoDeploy: true
     envVars:
       - key: ALLOWED_ORIGINS
         value: "*"
+      - key: PORT
+        value: "8000"
