@@ -100,7 +100,13 @@ export const projectsApi = {
     return response.data;
   },
 
-  startExecution: async (projectId: string) => {
+  startExecution: async (projectId: string): Promise<{
+    job_id: string;
+    status: string;
+    message: string;
+    sas_output: { status: string; logs: string[]; output: string };
+    r_output: { status: string; logs: string[]; output: string; r_available: boolean };
+  }> => {
     const response = await api.post(`/projects/${projectId}/execute`);
     return response.data;
   },
@@ -126,6 +132,14 @@ export const projectsApi = {
 
   getRCode: async (projectId: string): Promise<{ r_code: string }> => {
     const response = await api.get(`/projects/${projectId}/r-code`);
+    return response.data;
+  },
+
+  getExecutionOutput: async (projectId: string): Promise<{
+    sas_output: { status: string; output: string; logs: string[]; datasets: any };
+    r_output: { status: string; output: string; logs: string[]; r_available: boolean; errors?: string };
+  }> => {
+    const response = await api.get(`/projects/${projectId}/execution/output`);
     return response.data;
   },
 };

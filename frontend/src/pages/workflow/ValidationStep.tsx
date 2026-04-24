@@ -9,6 +9,7 @@ const ValidationStep: React.FC = () => {
   const navigate = useNavigate();
   const [feedbackGiven, setFeedbackGiven] = useState(false);
   const [showFeedbackForm, setShowFeedbackForm] = useState(false);
+  const [correctionText, setCorrectionText] = useState('');
 
   const { data: validation, isLoading } = useQuery({
     queryKey: ['validation', projectId],
@@ -43,6 +44,7 @@ const ValidationStep: React.FC = () => {
       translation_id: projectId!,
       is_correct: false,
       corrections,
+      user_notes: corrections?.user_notes,
     });
   };
 
@@ -169,17 +171,19 @@ const ValidationStep: React.FC = () => {
                 <textarea
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none resize-none mb-4"
                   rows={4}
+                  value={correctionText}
+                  onChange={(e) => setCorrectionText(e.target.value)}
                   placeholder="Describe the issues or provide the correct R code..."
                 />
                 <div className="flex gap-3">
                   <button
-                    onClick={() => setShowFeedbackForm(false)}
+                    onClick={() => { setShowFeedbackForm(false); setCorrectionText(''); }}
                     className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
                   >
                     Cancel
                   </button>
                   <button
-                    onClick={() => handleSubmitCorrection({})}
+                    onClick={() => handleSubmitCorrection({ user_notes: correctionText })}
                     className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
                   >
                     Submit Feedback
