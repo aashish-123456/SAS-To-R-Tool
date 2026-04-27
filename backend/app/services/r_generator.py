@@ -45,8 +45,11 @@ class RCodeGenerator:
         self.class_vars: List[str] = []
         self.by_vars: List[str] = []
         self.by_desc: bool = False
+        self.by_var_desc: List[bool] = []
         self.table_vars: List[str] = []
         self.data_step_active: bool = False
+        self.data_has_set: bool = False          # True when current DATA step used SET
+        self.where_condition: Optional[str] = None
         # ops deferred until dataset exists (DATALINES or SET)
         self.pending_data_ops: List[str] = []
         self.pending_post_data_ops: List[str] = []
@@ -68,6 +71,7 @@ class RCodeGenerator:
         self.current_means_stmt = {}
         self.current_title = None
         self.where_condition: Optional[str] = None
+        self.data_has_set = False
 
     # ── node dispatcher ───────────────────────────────────────────────────
 
@@ -89,6 +93,7 @@ class RCodeGenerator:
                 self.lines.append(f"{self.current_dataset} <- bind_rows({', '.join(datasets)})")
             else:
                 self.lines.append(f"{self.current_dataset} <- {datasets[0]}")
+            self.data_has_set = True
 
         elif t == 'input':
             self.input_vars = node.get('variables', [])
@@ -132,7 +137,7 @@ class RCodeGenerator:
             self.current_proc = 'proc_means'
             self.proc_opts = node.get('options', {})
             self.stat_opts = node.get('stat_options',
-                                       ['n', 'mean', 'median', 'min', 'max', 'std'])
+                                       ['n', 'mean', 'std', 'min', 'max'])
             self.analyze_vars = []
             self.class_vars = []
 
@@ -224,11 +229,16 @@ class RCodeGenerator:
             if self.data_step_active:
                 self._emit_data_step()
             elif self.current_dataset:
-                # Assignment-only DATA step (no SET/INPUT/DATALINES):
-                # create a single-row frame so deferred mutate() ops can execute.
+                # DATA step with SET or pure-assignment (no DATALINES).
+                # Only seed a single-row frame if neither SET nor INPUT provided data.
                 seeded_single_row = False
                 if self.pending_data_ops:
-                    if not self.input_vars and not self.inline_data:
+                    needs_seed = (
+                        not self.input_vars
+                        and not self.inline_data
+                        and not self.data_has_set
+                    )
+                    if needs_seed:
                         self.lines.append(f"{self.current_dataset} <- data.frame(.row = 1)")
                         seeded_single_row = True
                     self.lines.extend(self.pending_data_ops)
@@ -316,7 +326,7 @@ class RCodeGenerator:
         self.lines.append(
             f"cat(sprintf('NOTE: Dataset {ds.upper()} has %d observations "
             f"and %d variables.\\n', nrow({ds}), ncol({ds})))")
-        self.lines.append(f"print({ds})")
+        self.lines.append(f"print(as.data.frame({ds}), row.names = FALSE)")
         self.data_step_active = False
 
     def _next_inline_block(self) -> List[List[str]]:
@@ -338,7 +348,7 @@ class RCodeGenerator:
         self.lines.append(
             f"cat(sprintf('NOTE: Dataset {ds.upper()} has %d observations "
             f"and %d variables.\\n', nrow({ds}), ncol({ds})))")
-        self.lines.append(f"print(head({ds}))")
+        self.lines.append(f"print(as.data.frame({ds}), row.names = FALSE)")
 
     def _emit_assignment(self, node: Dict[str, Any]):
         var = node.get('variable', '')
@@ -515,8 +525,9 @@ class RCodeGenerator:
             'sum':    ('Sum',     'sum({v}, na.rm = TRUE)'),
             'nmiss':  ('NMiss',   'sum(is.na({v}))'),
         }
+        # Default order matches SAS PROC MEANS default: N Mean StdDev Min Max
         use_stats = [s for s in self.stat_opts if s in stat_map] or \
-                    ['n', 'mean', 'median', 'min', 'max', 'std']
+                    ['n', 'mean', 'std', 'min', 'max']
         vars_ = self.analyze_vars
 
         self.lines.append(f"# PROC MEANS: Summary statistics for {ds}")
@@ -531,25 +542,33 @@ class RCodeGenerator:
         else:
             self.lines.append(f"summary_stats <- {ds} %>%")
 
-        self.lines.append("  summarise(")
-        summaries = []
         if vars_:
+            # Named VAR list: emit one column per stat per variable
+            summaries = []
             for v in vars_:
                 for sk in use_stats:
                     label, expr_tmpl = stat_map[sk]
                     summaries.append(
                         f"    {label}_{v} = {expr_tmpl.replace('{v}', v)}")
+            self.lines.append("  summarise(")
+            self.lines.append(',\n'.join(summaries))
+            self.lines.append("  )")
         else:
-            # no VAR – use all numeric columns with across()
+            # No VAR: use across() with a named list so dplyr names columns
+            # correctly as "{stat}_{col}" (e.g. Mean_Revenue).
+            # Using tilde-lambda (~) for dplyr 1.0+ compatibility.
+            across_parts = []
             for sk in use_stats:
                 label, expr_tmpl = stat_map[sk]
                 fn = expr_tmpl.replace('{v}', '.x')
-                summaries.append(f"    {label} = across(where(is.numeric), ~{fn})")
-        self.lines.append(',\n'.join(summaries))
-        self.lines.append("  )")
+                across_parts.append(f"    {label} = ~{fn}")
+            self.lines.append("  summarise(across(where(is.numeric), list(")
+            self.lines.append(',\n'.join(across_parts))
+            self.lines.append('  ), .names = "{.fn}_{.col}"))')
+
         if self.class_vars:
             self.lines.append("summary_stats <- ungroup(summary_stats)")
-        self.lines.append("print(summary_stats)")
+        self.lines.append("print(as.data.frame(summary_stats), row.names = FALSE)")
 
     def _emit_proc_freq(self):
         ds = self.proc_opts.get('data', self.current_dataset) or 'data'
@@ -565,6 +584,8 @@ class RCodeGenerator:
                     f"  count({cols}) %>%",
                     "  mutate(Percent = round(n / sum(n) * 100, 2))",
                 ]
+                self.lines.append(f"cat(sprintf('\\nFrequency Table for {var}\\n'))")
+                self.lines.append(f"print(as.data.frame(freq_{safe}), row.names = FALSE)")
             else:
                 self.lines += [
                     f"freq_{safe} <- {ds} %>%",
@@ -575,8 +596,12 @@ class RCodeGenerator:
                     "    CumPercent = cumsum(Percent)",
                     "  )",
                 ]
-            self.lines.append(f"cat(sprintf('\\nFrequency Table for {var}\\n'))")
-            self.lines.append(f"print(freq_{safe})")
+                self.lines.append(f"cat(sprintf('\\nFrequency Table for {var}\\n'))")
+                self.lines.append(f"print(as.data.frame(freq_{safe}), row.names = FALSE)")
+                # Print Total row to match SAS PROC FREQ output
+                self.lines.append(
+                    f"cat(sprintf('%-20s %12d %10s\\n', 'Total', sum(freq_{safe}$n), '100.00'))"
+                )
 
     def _emit_proc_sort(self):
         ds = self.proc_opts.get('data', self.current_dataset) or 'data'
@@ -591,9 +616,10 @@ class RCodeGenerator:
             self.lines.append(f"{out} <- {ds} %>%")
             self.lines.append(f"  arrange({', '.join(exprs)})")
             self.lines.append(
-                f"cat(sprintf('NOTE: {out.upper()} sorted by "
-                f"{', '.join(self.by_vars)}.\\n'))")
-            self.lines.append(f"print(head({out}))")
+                f"cat(sprintf('NOTE: There were %d observations read from {ds.upper()}.\\n', nrow({ds})))")
+            self.lines.append(
+                f"cat(sprintf('NOTE: Dataset {out.upper()} has %d observations and %d variables.\\n', nrow({out}), ncol({out})))")
+            self.lines.append(f"print(as.data.frame({out}), row.names = FALSE)")
         else:
             self.lines.append("# NOTE: No BY variables specified for PROC SORT")
 
@@ -610,9 +636,9 @@ class RCodeGenerator:
             ds_ref = ds
         if self.analyze_vars:
             cols = ', '.join(f'"{v}"' for v in self.analyze_vars)
-            self.lines.append(f"print({ds_ref}[, c({cols}), drop = FALSE])")
+            self.lines.append(f"print(as.data.frame({ds_ref}[, c({cols}), drop = FALSE]), row.names = FALSE)")
         else:
-            self.lines.append(f"print({ds_ref})")
+            self.lines.append(f"print(as.data.frame({ds_ref}), row.names = FALSE)")
 
     def _emit_proc_transpose(self):
         ds = self.proc_opts.get('data', self.current_dataset) or 'data'
@@ -622,7 +648,7 @@ class RCodeGenerator:
             f"# Convert long↔wide using tidyr::pivot_wider / pivot_longer",
             f"{out} <- {ds} %>%",
             f"  pivot_wider(names_from = 1, values_from = 2)  # adjust columns",
-            f"print({out})",
+            f"print(as.data.frame({out}), row.names = FALSE)",
         ]
 
     def _emit_proc_glm(self):

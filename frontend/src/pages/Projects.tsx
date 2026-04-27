@@ -1,7 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Plus, ExternalLink } from 'lucide-react';
+import { Plus, FolderOpen, ArrowRight, FileCode2 } from 'lucide-react';
 import { projectsApi } from '@/services/api';
 
 const Projects: React.FC = () => {
@@ -10,73 +10,95 @@ const Projects: React.FC = () => {
     queryFn: projectsApi.getAll,
   });
 
+  const sortedProjects = [...projects].sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  );
+
   return (
     <div className="fade-in">
-      <div className="flex justify-between items-center mb-8">
-        <h1 className="text-2xl font-semibold text-gray-900">All Projects</h1>
+      {/* Header */}
+      <div className="flex items-center justify-between mb-7">
+        <div>
+          <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight">Projects</h1>
+          {!isLoading && (
+            <p className="text-sm text-slate-500 mt-0.5">
+              {projects.length} project{projects.length !== 1 ? 's' : ''}
+            </p>
+          )}
+        </div>
         <Link
           to="/projects/new"
-          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+          className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors text-sm font-semibold shadow-sm"
         >
-          <Plus className="w-5 h-5" />
+          <Plus className="w-4 h-4" />
           New Project
         </Link>
       </div>
 
       {isLoading ? (
-        <div className="text-center py-12">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600 mx-auto"></div>
+        <div className="flex justify-center items-center py-24">
+          <div className="animate-spin rounded-full h-10 w-10 border-2 border-blue-600 border-t-transparent" />
         </div>
+      ) : sortedProjects.length === 0 ? (
+        <EmptyState />
       ) : (
-        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
           <table className="w-full">
-            <thead className="bg-gray-50 border-b border-gray-200">
-              <tr>
-                <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">
-                  Project name
+            <thead>
+              <tr className="border-b border-slate-100 bg-slate-50/60">
+                <th className="text-left px-6 py-3.5 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                  Project
                 </th>
-                <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">
+                <th className="text-left px-6 py-3.5 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
                   Status
                 </th>
-                <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">
-                  Match rate
-                </th>
-                <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">
+                <th className="text-left px-6 py-3.5 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
                   Created
                 </th>
-                <th className="text-center px-6 py-3 text-sm font-medium text-gray-700">
-                  Actions
+                <th className="text-right px-6 py-3.5 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                  Action
                 </th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-200">
-              {projects.map((project) => (
+            <tbody className="divide-y divide-slate-100">
+              {sortedProjects.map((project) => (
                 <tr
                   key={project.id}
-                  className="hover:bg-gray-50 transition-colors"
+                  className="hover:bg-slate-50/70 transition-colors group"
                 >
                   <td className="px-6 py-4">
-                    <div className="font-medium text-gray-900">{project.name}</div>
-                    {project.description && (
-                      <div className="text-sm text-gray-500">{project.description}</div>
-                    )}
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0 group-hover:bg-blue-100 transition-colors">
+                        <FileCode2 className="w-4 h-4 text-blue-600" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="font-semibold text-slate-900 text-sm group-hover:text-blue-700 transition-colors truncate">
+                          {project.name}
+                        </p>
+                        {project.description && (
+                          <p className="text-xs text-slate-500 mt-0.5 truncate max-w-xs">
+                            {project.description}
+                          </p>
+                        )}
+                      </div>
+                    </div>
                   </td>
                   <td className="px-6 py-4">
                     <StatusBadge status={project.status} />
                   </td>
-                  <td className="px-6 py-4 text-gray-700">
-                    {project.status === 'validated' ? '96%' : '—'}
+                  <td className="px-6 py-4 text-sm text-slate-500">
+                    {new Date(project.created_at).toLocaleDateString('en-US', {
+                      month: 'short',
+                      day: 'numeric',
+                      year: 'numeric',
+                    })}
                   </td>
-                  <td className="px-6 py-4 text-gray-700">
-                    {new Date(project.created_at).toLocaleDateString()}
-                  </td>
-                  <td className="px-6 py-4 text-center">
+                  <td className="px-6 py-4 text-right">
                     <Link
                       to={`/projects/${project.id}`}
-                      className="inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700"
+                      className="inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 font-semibold transition-colors"
                     >
-                      View
-                      <ExternalLink className="w-4 h-4" />
+                      Open <ArrowRight className="w-4 h-4" />
                     </Link>
                   </td>
                 </tr>
@@ -89,18 +111,38 @@ const Projects: React.FC = () => {
   );
 };
 
-const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
-  const config = {
-    completed: { label: 'Completed', className: 'bg-green-100 text-green-800' },
-    validated: { label: 'Completed', className: 'bg-green-100 text-green-800' },
-    executing: { label: 'Executing', className: 'bg-yellow-100 text-yellow-800' },
-    translating: { label: 'Translating', className: 'bg-yellow-100 text-yellow-800' },
-    pending: { label: 'Pending', className: 'bg-gray-100 text-gray-800' },
-  }[status] || { label: status, className: 'bg-gray-100 text-gray-800' };
+const EmptyState: React.FC = () => (
+  <div className="bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col items-center justify-center py-20 text-center px-8">
+    <div className="w-16 h-16 bg-blue-50 rounded-2xl flex items-center justify-center mb-5">
+      <FolderOpen className="w-8 h-8 text-blue-500" />
+    </div>
+    <h2 className="text-lg font-bold text-slate-900 mb-2">No projects yet</h2>
+    <p className="text-sm text-slate-500 mb-6 max-w-sm leading-relaxed">
+      Create your first conversion project to start transforming SAS scripts into production-ready R code.
+    </p>
+    <Link
+      to="/projects/new"
+      className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white text-sm font-semibold rounded-xl hover:bg-blue-700 transition-colors shadow-sm"
+    >
+      <Plus className="w-4 h-4" />
+      Create First Project
+    </Link>
+  </div>
+);
 
+const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
+  const config: Record<string, { label: string; cls: string }> = {
+    validated: { label: 'Completed', cls: 'bg-emerald-100 text-emerald-700' },
+    completed: { label: 'Completed', cls: 'bg-emerald-100 text-emerald-700' },
+    executing: { label: 'Running', cls: 'bg-amber-100 text-amber-700' },
+    translating: { label: 'Translating', cls: 'bg-blue-100 text-blue-700' },
+    uploaded: { label: 'Uploaded', cls: 'bg-violet-100 text-violet-700' },
+    pending: { label: 'Pending', cls: 'bg-slate-100 text-slate-500' },
+  };
+  const { label, cls } = config[status] ?? { label: status, cls: 'bg-slate-100 text-slate-500' };
   return (
-    <span className={`inline-block px-3 py-1 rounded-md text-xs font-medium ${config.className}`}>
-      {config.label}
+    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${cls}`}>
+      {label}
     </span>
   );
 };

@@ -121,12 +121,13 @@ class SASParser:
             parts = stmt.split()
             raw = parts[1] if len(parts) > 1 else 'work'
             lib, name = ('work', raw) if '.' not in raw else raw.split('.', 1)
-            return {'type': 'data_step', 'dataset': name, 'library': lib}
+            # Normalise to lowercase so simulator/generator lookups are case-insensitive
+            return {'type': 'data_step', 'dataset': name.lower(), 'library': lib.lower()}
 
         # SET
         if lo.startswith('set '):
             rest = stmt[4:].strip()
-            names = [tok.split('.')[-1] for tok in rest.split() if tok]
+            names = [tok.split('.')[-1].lower() for tok in rest.split() if tok]
             if not names:
                 names = ['unknown']
             return {'type': 'set', 'datasets': names, 'dataset': names[0]}
@@ -339,19 +340,22 @@ class SASParser:
             if tag in lo:
                 idx = lo.index(tag) + len(tag)
                 val = stmt[idx:].split()[0].rstrip(';').strip()
-                opts[key] = val.split('.')[-1]
-                opts[f'{key}_full'] = val
+                # Normalise dataset name to lowercase to match data_step/set normalisation
+                opts[key] = val.split('.')[-1].lower()
+                opts[f'{key}_full'] = val.lower()
         # Common PROC PRINT style flags
         if re.search(r'\bnoobs\b', lo):
             opts['noobs'] = True
         return opts
 
     def _stat_opts(self, stmt: str) -> List[str]:
-        known = ['n', 'mean', 'median', 'min', 'max', 'std', 'var',
+        # Order matches SAS PROC MEANS default output: N Mean StdDev Min Max
+        known = ['n', 'mean', 'std', 'min', 'max', 'median', 'var',
                  'sum', 'q1', 'q3', 'nmiss', 'stderr', 'cv', 'mode', 'range']
         lo = stmt.lower()
         found = [k for k in known if re.search(r'\b' + k + r'\b', lo)]
-        return found or ['n', 'mean', 'median', 'min', 'max', 'std']
+        # Default matches SAS PROC MEANS default output: N Mean StdDev Min Max
+        return found or ['n', 'mean', 'std', 'min', 'max']
 
     def _parse_if(self, stmt: str) -> Dict[str, Any]:
         lo = stmt.lower()

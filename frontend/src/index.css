@@ -6,11 +6,9 @@
   font-family: Inter, "Segoe UI", system-ui, -apple-system, Helvetica, Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
-
   color-scheme: light;
   color: #0f172a;
   background-color: #f8fafc;
-
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -28,48 +26,72 @@ body {
   box-sizing: border-box;
 }
 
-/* Custom scrollbar */
+/* Scrollbar */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
-
 ::-webkit-scrollbar-track {
-  background: #f1f1f1;
+  background: transparent;
 }
-
 ::-webkit-scrollbar-thumb {
-  background: #94a3b8;
-  border-radius: 4px;
+  background: #cbd5e1;
+  border-radius: 100px;
 }
-
 ::-webkit-scrollbar-thumb:hover {
-  background: #64748b;
+  background: #94a3b8;
 }
 
-/* Loading spinner */
+/* Animations */
 @keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
+  to { transform: rotate(360deg); }
 }
-
 .animate-spin {
   animation: spin 1s linear infinite;
 }
 
-/* Fade in animation */
 @keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.fade-in {
+  animation: fadeIn 0.25s ease-out;
 }
 
-.fade-in {
-  animation: fadeIn 0.3s ease-out;
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.slide-in {
+  animation: slideIn 0.2s ease-out;
+}
+
+@keyframes progressFill {
+  from { width: 0%; }
+}
+.progress-animated {
+  animation: progressFill 0.6s ease-out;
+}
+
+/* Code block */
+.code-block {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 0.625rem;
+  padding: 1rem;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, 'Courier New', monospace;
+  font-size: 0.75rem;
+  line-height: 1.75;
+  overflow: auto;
+  tab-size: 2;
+}
+
+/* Step connector line fix */
+.step-connector {
+  height: 2px;
+  flex: 1;
+  margin-top: -1.5rem;
+  margin-left: 0.75rem;
+  margin-right: 0.75rem;
+  border-radius: 9999px;
 }

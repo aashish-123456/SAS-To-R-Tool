@@ -1,13 +1,21 @@
 import React from 'react';
 import { useNavigate, useParams, Routes, Route } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Upload, Code, Play, CheckCircle, FileText } from 'lucide-react';
+import { Upload, Code2, Play, CheckCircle2, Download } from 'lucide-react';
 import { projectsApi } from '@/services/api';
 import UploadStep from './workflow/UploadStep';
 import TranslationStep from './workflow/TranslationStep';
 import ExecutionStep from './workflow/ExecutionStep';
 import ValidationStep from './workflow/ValidationStep';
 import ReportStep from './workflow/ReportStep';
+
+const steps = [
+  { id: 'upload',      label: 'Upload',    fullLabel: 'Upload SAS Inputs',       icon: Upload,       path: 'upload' },
+  { id: 'translation', label: 'Translate', fullLabel: 'SAS → R Translation',     icon: Code2,        path: 'translation' },
+  { id: 'execution',   label: 'Execute',   fullLabel: 'Dual Runtime Execution',   icon: Play,         path: 'execution' },
+  { id: 'validation',  label: 'Validate',  fullLabel: 'Output Reconciliation',    icon: CheckCircle2, path: 'validation' },
+  { id: 'report',      label: 'Export',    fullLabel: 'Export R Script',          icon: Download,     path: 'report' },
+];
 
 const ProjectWorkflow: React.FC = () => {
   const { projectId } = useParams<{ projectId: string }>();
@@ -19,170 +27,156 @@ const ProjectWorkflow: React.FC = () => {
     enabled: !!projectId,
   });
 
-  const steps = [
-    { id: 'upload', label: 'Upload SAS Inputs', icon: Upload, path: 'upload' },
-    { id: 'translation', label: 'SAS to R Transformation', icon: Code, path: 'translation' },
-    { id: 'execution', label: 'Dual Runtime Execution', icon: Play, path: 'execution' },
-    { id: 'validation', label: 'Output Reconciliation', icon: CheckCircle, path: 'validation' },
-    { id: 'report', label: 'Export R Script', icon: FileText, path: 'report' },
-  ];
+  const getFileName = (filePath?: string) =>
+    filePath ? filePath.replace(/\\/g, '/').split('/').pop() ?? filePath : '';
 
-  const getFileName = (filePath?: string) => {
-    if (!filePath) return '';
-    const normalizedPath = filePath.replace(/\\/g, '/');
-    const segments = normalizedPath.split('/');
-    return segments[segments.length - 1] || filePath;
+  const getOriginalName = (filePath?: string) => {
+    const stored = getFileName(filePath);
+    if (!stored) return '';
+    const m = stored.match(/^.+_(sas|dataset)_[0-9a-fA-F-]{36}_(.+)$/);
+    return m?.[2] ?? stored;
   };
 
-  const getOriginalUploadedFileName = (filePath?: string) => {
-    const storedName = getFileName(filePath);
-    if (!storedName) return '';
-
-    // Backend format: {project_id}_{file_type}_{uuid}_{original_filename}
-    // Show only the original uploaded filename in UI tooltips.
-    const match = storedName.match(/^.+_(sas|dataset)_[0-9a-fA-F-]{36}_(.+)$/);
-    return match?.[2] || storedName;
+  const stripExt = (name?: string) => {
+    if (!name) return '';
+    const dot = name.lastIndexOf('.');
+    return dot > 0 ? name.slice(0, dot) : name;
   };
 
-  const getBaseNameWithoutExtension = (fileName?: string) => {
-    if (!fileName) return '';
-    const lastDot = fileName.lastIndexOf('.');
-    return lastDot > 0 ? fileName.slice(0, lastDot) : fileName;
-  };
-
-  const getStepTooltipLines = (stepId: string) => {
-    if (!project) return ['Loading project details...'];
-
+  const getTooltipLines = (stepId: string): string[] => {
+    if (!project) return ['Loading…'];
     switch (stepId) {
       case 'upload': {
-        const sasFileName = getOriginalUploadedFileName(project.sas_file_id);
-        const datasetFiles = project.dataset_files ?? [];
-        const datasetNames = datasetFiles.map((datasetPath) => getOriginalUploadedFileName(datasetPath));
-
-        if (!sasFileName && datasetNames.length === 0) {
-          return ['No files uploaded yet'];
-        }
-
-        const lines = [];
-        if (sasFileName) {
-          lines.push(`SAS file: ${sasFileName}`);
-        }
-        if (datasetNames.length > 0) {
-          lines.push(`Datasets: ${datasetNames.join(', ')}`);
-        }
+        const sas = getOriginalName(project.sas_file_id);
+        const ds = (project.dataset_files ?? []).map(getOriginalName);
+        if (!sas && ds.length === 0) return ['No files uploaded yet'];
+        const lines: string[] = [];
+        if (sas) lines.push(`SAS file: ${sas}`);
+        if (ds.length) lines.push(`Datasets: ${ds.join(', ')}`);
         return lines;
       }
-      case 'translation':
-        {
-          const sasFileName = getOriginalUploadedFileName(project.sas_file_id);
-          const rFileName = sasFileName
-            ? `${getBaseNameWithoutExtension(sasFileName)}_transformed.R`
-            : 'transformed_output.R';
-
-          return [
-            sasFileName
-              ? `Input: ${sasFileName}`
-              : 'Input SAS file not uploaded yet',
-            `Output: ${rFileName}`,
-            'Content: Converted R script with equivalent SAS logic',
-          ];
-        }
+      case 'translation': {
+        const sas = getOriginalName(project.sas_file_id);
+        const r = sas ? `${stripExt(sas)}_transformed.R` : 'transformed.R';
+        return [
+          sas ? `Input: ${sas}` : 'SAS file not uploaded yet',
+          `Output: ${r}`,
+        ];
+      }
       case 'execution':
         return [
-          'Runs uploaded SAS inputs and generated R script in parallel',
-          'Content: Runtime logs, row/column checks, and execution summary',
+          'Runs SAS simulation + R script in parallel',
+          'Captures logs and output from both runtimes',
         ];
       case 'validation':
         return [
-          'Compares SAS vs R outputs for structure and values',
-          'Content: Match %, discrepancy summary, and statistical checks',
+          'Compares SAS vs R outputs numerically',
+          'Reports match %, discrepancies, and issues',
         ];
       case 'report':
         return [
-          'File: transformed_output.R',
-          'Content: Export and download transformed R script',
+          'Download the generated .R file',
+          'Review full validation summary',
         ];
       default:
-        return ['No details available'];
+        return [];
     }
   };
 
   const getCurrentStepIndex = () => {
     const path = window.location.pathname;
-    const stepIndex = steps.findIndex(s => path.includes(s.path));
-    return stepIndex === -1 ? 0 : stepIndex;
+    const idx = steps.findIndex(s => path.includes(s.path));
+    return idx === -1 ? 0 : idx;
   };
 
   const currentStepIndex = getCurrentStepIndex();
 
   const handleStepClick = (stepPath: string) => {
     if (!projectId) return;
-
-    if (stepPath === 'upload') {
-      const selected = window.prompt(
-        'Choose upload section:\n1 for SAS Code\n2 for SAS Dataset',
-        '1'
-      );
-
-      if (selected === '2') {
-        navigate(`/projects/${projectId}/upload?uploadType=dataset`);
-        return;
-      }
-      navigate(`/projects/${projectId}/upload?uploadType=sas`);
-      return;
-    }
-
     navigate(`/projects/${projectId}/${stepPath}`);
   };
 
+  const statusConfig: Record<string, { label: string; cls: string }> = {
+    validated:  { label: 'Completed',   cls: 'bg-emerald-100 text-emerald-700' },
+    completed:  { label: 'Completed',   cls: 'bg-emerald-100 text-emerald-700' },
+    executing:  { label: 'Running',     cls: 'bg-amber-100  text-amber-700'   },
+    translating:{ label: 'Translating', cls: 'bg-blue-100   text-blue-700'    },
+    uploaded:   { label: 'Uploaded',    cls: 'bg-violet-100 text-violet-700'  },
+    pending:    { label: 'Pending',     cls: 'bg-slate-100  text-slate-500'   },
+  };
+  const pStatus = project?.status ?? 'pending';
+  const { label: statusLabel, cls: statusCls } = statusConfig[pStatus] ?? { label: pStatus, cls: 'bg-slate-100 text-slate-500' };
+
   return (
-    <div className="fade-in">
-      {/* Project Header */}
-      <div className="mb-8 bg-white/90 backdrop-blur-sm border border-slate-200 rounded-xl shadow-sm p-6">
-        <h1 className="text-2xl font-semibold text-slate-900 mb-2 tracking-tight">
-          {project?.name || 'Loading...'}
-        </h1>
-        <p className="text-slate-600">
-          {project?.description || 'Project workflow'}
-        </p>
+    <div className="fade-in space-y-5">
+      {/* Project header */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm px-6 py-5 flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          {project ? (
+            <>
+              <h1 className="text-xl font-extrabold text-slate-900 tracking-tight truncate">
+                {project.name}
+              </h1>
+              {project.description && (
+                <p className="text-sm text-slate-500 mt-1 truncate">{project.description}</p>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="h-6 w-48 bg-slate-200 rounded-lg animate-pulse mb-2" />
+              <div className="h-4 w-32 bg-slate-100 rounded animate-pulse" />
+            </>
+          )}
+        </div>
+        {project && (
+          <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold flex-shrink-0 ${statusCls}`}>
+            {statusLabel}
+          </span>
+        )}
       </div>
 
-      {/* Workflow Steps */}
-      <div className="mb-8 bg-white/90 backdrop-blur-sm border border-slate-200 rounded-xl shadow-sm p-5">
-        <div className="pb-2">
-          <div className="flex items-start justify-between gap-2">
+      {/* Workflow stepper */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm px-6 py-5">
+        <div className="flex items-start">
           {steps.map((step, index) => {
             const Icon = step.icon;
-            const isActive = index === currentStepIndex;
+            const isActive    = index === currentStepIndex;
             const isCompleted = index < currentStepIndex;
 
             return (
               <React.Fragment key={step.id}>
+                {/* Step button */}
                 <button
                   type="button"
                   onClick={() => handleStepClick(step.path)}
-                  className="flex-1 min-w-0 flex flex-col items-center relative group bg-transparent border-0 p-0 cursor-pointer"
+                  className="flex flex-col items-center gap-2 relative group cursor-pointer flex-shrink-0 focus:outline-none"
                 >
                   <div
-                    className={`w-12 h-12 rounded-full flex items-center justify-center mb-2 transition-colors shadow-sm ring-1 ${
+                    className={`w-10 h-10 rounded-full flex items-center justify-center transition-all shadow-sm ${
                       isActive
-                        ? 'bg-blue-600 text-white ring-blue-200'
+                        ? 'bg-blue-600 text-white ring-4 ring-blue-100'
                         : isCompleted
-                        ? 'bg-emerald-500 text-white ring-emerald-200'
-                        : 'bg-slate-200 text-slate-500 ring-slate-200'
+                        ? 'bg-emerald-500 text-white hover:bg-emerald-600'
+                        : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
                     }`}
                   >
-                    <Icon className="w-6 h-6" />
+                    <Icon className="w-[18px] h-[18px]" />
                   </div>
                   <span
-                    className={`text-sm font-medium ${
-                      isActive ? 'text-blue-600' : isCompleted ? 'text-emerald-600' : 'text-slate-500'
-                    } text-center leading-tight text-xs md:text-sm px-1 break-words`}
+                    className={`text-[11px] font-semibold text-center leading-tight select-none ${
+                      isActive
+                        ? 'text-blue-700'
+                        : isCompleted
+                        ? 'text-emerald-600'
+                        : 'text-slate-400'
+                    }`}
                   >
                     {step.label}
                   </span>
+
+                  {/* Tooltip */}
                   <div
-                    className={`pointer-events-none absolute top-full mt-2 w-72 rounded-lg border border-gray-200 bg-white p-3 text-left shadow-lg opacity-0 transition-opacity group-hover:opacity-100 z-20 ${
+                    className={`pointer-events-none absolute top-full mt-2.5 w-56 bg-white border border-slate-200 rounded-xl shadow-xl p-3.5 text-left opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-40 ${
                       index === 0
                         ? 'left-0'
                         : index === steps.length - 1
@@ -190,20 +184,21 @@ const ProjectWorkflow: React.FC = () => {
                         : 'left-1/2 -translate-x-1/2'
                     }`}
                   >
-                    <p className="text-xs font-semibold text-gray-900 mb-2">Step Details</p>
-                    {getStepTooltipLines(step.id).map((line) => (
-                      <p key={line} className="text-xs text-gray-700 mb-1 last:mb-0 break-words">
+                    <p className="text-xs font-bold text-slate-900 mb-2">{step.fullLabel}</p>
+                    {getTooltipLines(step.id).map((line, i) => (
+                      <p key={i} className="text-xs text-slate-600 leading-relaxed break-words">
                         {line}
                       </p>
                     ))}
                   </div>
                 </button>
 
+                {/* Connector line */}
                 {index < steps.length - 1 && (
-                  <div className="flex-1 h-1 mx-4 mt-6">
+                  <div className="flex-1 px-3 mt-5">
                     <div
-                      className={`h-full rounded ${
-                        index < currentStepIndex ? 'bg-emerald-500' : 'bg-slate-200'
+                      className={`h-0.5 rounded-full transition-colors duration-300 ${
+                        index < currentStepIndex ? 'bg-emerald-400' : 'bg-slate-200'
                       }`}
                     />
                   </div>
@@ -211,18 +206,17 @@ const ProjectWorkflow: React.FC = () => {
               </React.Fragment>
             );
           })}
-          </div>
         </div>
       </div>
 
-      {/* Step Content */}
+      {/* Step content */}
       <Routes>
-        <Route path="upload" element={<UploadStep />} />
+        <Route path="upload"      element={<UploadStep />} />
         <Route path="translation" element={<TranslationStep />} />
-        <Route path="execution" element={<ExecutionStep />} />
-        <Route path="validation" element={<ValidationStep />} />
-        <Route path="report" element={<ReportStep />} />
-        <Route path="*" element={<UploadStep />} />
+        <Route path="execution"   element={<ExecutionStep />} />
+        <Route path="validation"  element={<ValidationStep />} />
+        <Route path="report"      element={<ReportStep />} />
+        <Route path="*"           element={<UploadStep />} />
       </Routes>
     </div>
   );

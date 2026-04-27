@@ -1,7 +1,10 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Plus, FolderOpen, BookOpen, TrendingUp, Clock, CheckCircle2 } from 'lucide-react';
+import {
+  Plus, FolderOpen, ArrowRight, FileCode2,
+  CheckCircle2, Clock, Layers,
+} from 'lucide-react';
 import { projectsApi } from '@/services/api';
 
 const Dashboard: React.FC = () => {
@@ -10,108 +13,187 @@ const Dashboard: React.FC = () => {
     queryFn: projectsApi.getAll,
   });
 
-  const stats = {
-    translationSuccess: 87,
-    outputMatch: 96,
-    projectsCompleted: projects.filter(p => p.status === 'validated').length,
-    timeSaved: 680,
-  };
+  const totalProjects = projects.length;
+  const completedProjects = projects.filter(p => p.status === 'validated').length;
+  const activeProjects = projects.filter(p =>
+    ['executing', 'translating', 'uploaded'].includes(p.status)
+  ).length;
 
-  const recentProjects = projects.slice(0, 3);
+  const recentProjects = [...projects]
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+    .slice(0, 6);
 
   return (
-    <div className="fade-in">
-      {/* Hero Section */}
-      <div className="mb-8">
-        <h1 className="text-3xl font-semibold text-gray-900 mb-2">
-          Welcome to SAS→R Platform
-        </h1>
-        <p className="text-gray-600">
-          Automated translation, execution, and validation for clinical data
-        </p>
+    <div className="fade-in space-y-7">
+      {/* Hero Banner */}
+      <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-blue-600 via-blue-650 to-blue-700 shadow-lg p-8 text-white">
+        <div className="relative z-10 max-w-2xl">
+          <div className="inline-flex items-center gap-2 bg-white/15 rounded-full px-3 py-1 text-xs font-semibold text-blue-100 mb-4 backdrop-blur-sm">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            SAS to R Automation Platform
+          </div>
+          <h1 className="text-3xl font-extrabold tracking-tight mb-2 leading-tight">
+            Transform SAS Code<br className="hidden sm:block" /> into Production-Ready R
+          </h1>
+          <p className="text-blue-100 text-sm leading-relaxed mb-6 max-w-lg">
+            Upload your SAS scripts, get idiomatic R code via AST-based translation,
+            run both runtimes side-by-side, and validate output consistency — all in one workflow.
+          </p>
+          <div className="flex flex-wrap gap-3">
+            <Link
+              to="/projects/new"
+              className="inline-flex items-center gap-2 bg-white text-blue-700 px-5 py-2.5 rounded-xl font-bold text-sm hover:bg-blue-50 transition-colors shadow-sm"
+            >
+              <Plus className="w-4 h-4" />
+              Start New Conversion
+            </Link>
+            <Link
+              to="/projects"
+              className="inline-flex items-center gap-2 bg-white/15 text-white px-5 py-2.5 rounded-xl font-semibold text-sm hover:bg-white/25 transition-colors backdrop-blur-sm"
+            >
+              <FolderOpen className="w-4 h-4" />
+              My Projects
+            </Link>
+          </div>
+        </div>
+
+        {/* Decorative blobs */}
+        <div className="absolute right-0 top-0 w-72 h-72 bg-blue-500/20 rounded-full -translate-y-1/3 translate-x-1/4 blur-3xl pointer-events-none" />
+        <div className="absolute right-20 bottom-0 w-52 h-52 bg-blue-400/20 rounded-full translate-y-1/2 blur-2xl pointer-events-none" />
+        <div className="absolute left-1/2 top-1/2 w-32 h-32 bg-white/5 rounded-full -translate-x-1/2 -translate-y-1/2 blur-xl pointer-events-none" />
       </div>
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        <div className="bg-gray-100 rounded-lg p-5">
-          <p className="text-sm text-gray-600 mb-2">Translation success rate</p>
-          <p className="text-3xl font-semibold text-gray-900">{stats.translationSuccess}%</p>
+      {/* Stats Row — only real data */}
+      {!isLoading && (
+        <div className="grid grid-cols-3 gap-4">
+          <StatCard
+            icon={<Layers className="w-5 h-5" />}
+            label="Total Projects"
+            value={totalProjects}
+            colorClass="text-slate-700 bg-slate-100"
+            valueClass="text-slate-900"
+          />
+          <StatCard
+            icon={<CheckCircle2 className="w-5 h-5" />}
+            label="Completed"
+            value={completedProjects}
+            colorClass="text-emerald-700 bg-emerald-100"
+            valueClass="text-emerald-700"
+          />
+          <StatCard
+            icon={<Clock className="w-5 h-5" />}
+            label="In Progress"
+            value={activeProjects}
+            colorClass="text-amber-700 bg-amber-100"
+            valueClass="text-amber-700"
+          />
         </div>
-        <div className="bg-gray-100 rounded-lg p-5">
-          <p className="text-sm text-gray-600 mb-2">Output match accuracy</p>
-          <p className="text-3xl font-semibold text-gray-900">{stats.outputMatch}%</p>
-        </div>
-        <div className="bg-gray-100 rounded-lg p-5">
-          <p className="text-sm text-gray-600 mb-2">Projects completed</p>
-          <p className="text-3xl font-semibold text-gray-900">{stats.projectsCompleted}</p>
-        </div>
-        <div className="bg-gray-100 rounded-lg p-5">
-          <p className="text-sm text-gray-600 mb-2">Time saved</p>
-          <p className="text-3xl font-semibold text-gray-900">{stats.timeSaved}h</p>
-        </div>
-      </div>
+      )}
 
-      {/* Main Content Grid */}
+      {/* Main Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Recent Projects */}
-        <div className="lg:col-span-2 bg-white border border-gray-200 rounded-lg p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">Recent projects</h2>
+        <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+            <h2 className="font-semibold text-slate-900 text-[15px]">Recent Projects</h2>
+            <Link
+              to="/projects"
+              className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700 transition-colors"
+            >
+              View all <ArrowRight className="w-3.5 h-3.5" />
+            </Link>
+          </div>
 
           {isLoading ? (
-            <div className="text-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600 mx-auto"></div>
+            <div className="flex justify-center items-center py-16">
+              <div className="animate-spin rounded-full h-8 w-8 border-2 border-blue-600 border-t-transparent" />
             </div>
           ) : recentProjects.length === 0 ? (
-            <div className="text-center py-8 text-gray-500">
-              <FolderOpen className="w-12 h-12 mx-auto mb-2 opacity-50" />
-              <p>No projects yet. Create your first project to get started!</p>
+            <div className="flex flex-col items-center justify-center py-16 px-6 text-center">
+              <div className="w-14 h-14 bg-slate-100 rounded-2xl flex items-center justify-center mb-4">
+                <FolderOpen className="w-7 h-7 text-slate-400" />
+              </div>
+              <h3 className="font-semibold text-slate-900 mb-1">No projects yet</h3>
+              <p className="text-sm text-slate-500 mb-5 max-w-xs">
+                Create your first conversion project to begin transforming SAS code into R.
+              </p>
+              <Link
+                to="/projects/new"
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors"
+              >
+                <Plus className="w-4 h-4" />
+                New Project
+              </Link>
             </div>
           ) : (
-            <div className="space-y-3">
+            <div className="divide-y divide-slate-100">
               {recentProjects.map((project) => (
                 <Link
                   key={project.id}
-                  to={`/projects/${project.id}/validation`}
-                  className="block p-4 bg-gray-50 hover:bg-blue-50 rounded-lg transition-colors cursor-pointer border border-transparent hover:border-blue-200"
+                  to={`/projects/${project.id}`}
+                  className="flex items-center gap-4 px-6 py-4 hover:bg-slate-50/80 transition-colors group"
                 >
-                  <div className="flex justify-between items-center mb-2">
-                    <p className="font-medium text-gray-900">{project.name}</p>
-                    <StatusBadge status={project.status} />
+                  <div className="w-9 h-9 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0 group-hover:bg-blue-100 transition-colors">
+                    <FileCode2 className="w-4.5 h-4.5 text-blue-600" />
                   </div>
-                  <p className="text-sm text-gray-600">
-                    {project.description || 'No description'} • {getRelativeTime(project.created_at)}
-                  </p>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-semibold text-slate-900 truncate text-sm group-hover:text-blue-700 transition-colors">
+                      {project.name}
+                    </p>
+                    <p className="text-xs text-slate-500 mt-0.5 truncate">
+                      {project.description
+                        ? project.description
+                        : <span className="italic">No description</span>}
+                      {' · '}
+                      {getRelativeTime(project.created_at)}
+                    </p>
+                  </div>
+                  <StatusBadge status={project.status} />
                 </Link>
               ))}
             </div>
           )}
         </div>
 
-        {/* Quick Actions */}
-        <div className="bg-white border border-gray-200 rounded-lg p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">Quick actions</h2>
+        {/* Right column */}
+        <div className="space-y-5">
+          {/* Quick Actions */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
+            <h2 className="font-semibold text-slate-900 text-[15px] mb-4">Quick Actions</h2>
+            <div className="space-y-2.5">
+              <Link
+                to="/projects/new"
+                className="flex items-center gap-3 w-full px-4 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors font-semibold text-sm shadow-sm"
+              >
+                <Plus className="w-4 h-4 flex-shrink-0" />
+                New Conversion Project
+              </Link>
+              <Link
+                to="/projects"
+                className="flex items-center gap-3 w-full px-4 py-3 border border-slate-200 text-slate-700 rounded-xl hover:bg-slate-50 transition-colors text-sm font-medium"
+              >
+                <FolderOpen className="w-4 h-4 flex-shrink-0" />
+                Browse All Projects
+              </Link>
+            </div>
+          </div>
 
-          <div className="space-y-3">
-            <Link
-              to="/projects/new"
-              className="flex items-center justify-center gap-2 w-full px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
-            >
-              <Plus className="w-5 h-5" />
-              New Project
-            </Link>
-
-            <Link
-              to="/projects"
-              className="flex items-center justify-center gap-2 w-full px-4 py-3 border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
-            >
-              <FolderOpen className="w-5 h-5" />
-              Browse Projects
-            </Link>
-
-            <button className="flex items-center justify-center gap-2 w-full px-4 py-3 border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors">
-              <BookOpen className="w-5 h-5" />
-              View Documentation
-            </button>
+          {/* How It Works */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
+            <h2 className="font-semibold text-slate-900 text-[15px] mb-4">How It Works</h2>
+            <ol className="space-y-3.5">
+              {HOW_IT_WORKS.map(({ step, title, desc, color }) => (
+                <li key={step} className="flex items-start gap-3">
+                  <span className={`w-5 h-5 rounded-full text-xs font-bold flex items-center justify-center flex-shrink-0 mt-0.5 ${color}`}>
+                    {step}
+                  </span>
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900 leading-snug">{title}</p>
+                    <p className="text-xs text-slate-500 leading-relaxed">{desc}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
           </div>
         </div>
       </div>
@@ -119,37 +201,58 @@ const Dashboard: React.FC = () => {
   );
 };
 
+const HOW_IT_WORKS = [
+  { step: '1', title: 'Upload SAS Code', desc: 'Upload your .sas or .txt file, plus optional datasets', color: 'bg-blue-100 text-blue-700' },
+  { step: '2', title: 'Auto-Translate', desc: 'AST-based conversion to idiomatic R using dplyr, tidyr', color: 'bg-violet-100 text-violet-700' },
+  { step: '3', title: 'Dual Execution', desc: 'Run SAS simulation and R script side-by-side', color: 'bg-amber-100 text-amber-700' },
+  { step: '4', title: 'Validate & Export', desc: 'Compare outputs numerically and download .R file', color: 'bg-emerald-100 text-emerald-700' },
+];
+
+const StatCard: React.FC<{
+  icon: React.ReactNode;
+  label: string;
+  value: number;
+  colorClass: string;
+  valueClass: string;
+}> = ({ icon, label, value, colorClass, valueClass }) => (
+  <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 flex items-center gap-4">
+    <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${colorClass}`}>
+      {icon}
+    </div>
+    <div>
+      <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">{label}</p>
+      <p className={`text-2xl font-extrabold leading-none mt-1 ${valueClass}`}>{value}</p>
+    </div>
+  </div>
+);
+
 const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
-  const config = {
-    completed: { label: 'Completed', className: 'bg-green-100 text-green-800', icon: CheckCircle2 },
-    validated: { label: 'Completed', className: 'bg-green-100 text-green-800', icon: CheckCircle2 },
-    executing: { label: 'In Progress', className: 'bg-yellow-100 text-yellow-800', icon: Clock },
-    translating: { label: 'In Progress', className: 'bg-yellow-100 text-yellow-800', icon: Clock },
-    pending: { label: 'Pending', className: 'bg-gray-100 text-gray-800', icon: TrendingUp },
-  }[status] || { label: 'Unknown', className: 'bg-gray-100 text-gray-800', icon: TrendingUp };
-
-  const Icon = config.icon;
-
+  const config: Record<string, { label: string; cls: string }> = {
+    validated: { label: 'Completed', cls: 'bg-emerald-100 text-emerald-700' },
+    completed: { label: 'Completed', cls: 'bg-emerald-100 text-emerald-700' },
+    executing: { label: 'Running', cls: 'bg-amber-100 text-amber-700' },
+    translating: { label: 'Translating', cls: 'bg-blue-100 text-blue-700' },
+    uploaded: { label: 'Uploaded', cls: 'bg-violet-100 text-violet-700' },
+    pending: { label: 'Pending', cls: 'bg-slate-100 text-slate-500' },
+  };
+  const { label, cls } = config[status] ?? { label: status, cls: 'bg-slate-100 text-slate-500' };
   return (
-    <span className={`inline-flex items-center gap-1 px-3 py-1 rounded-md text-xs font-medium ${config.className}`}>
-      <Icon className="w-3 h-3" />
-      {config.label}
+    <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap flex-shrink-0 ${cls}`}>
+      {label}
     </span>
   );
 };
 
 const getRelativeTime = (dateString: string): string => {
   const date = new Date(dateString);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-  const diffDays = Math.floor(diffHours / 24);
-
-  if (diffHours < 1) return 'Just now';
-  if (diffHours < 24) return `${diffHours} hours ago`;
-  if (diffDays === 1) return 'Yesterday';
-  if (diffDays < 7) return `${diffDays} days ago`;
-  return date.toLocaleDateString();
+  const diffMs = Date.now() - date.getTime();
+  const diffH = Math.floor(diffMs / 3_600_000);
+  const diffD = Math.floor(diffH / 24);
+  if (diffH < 1) return 'Just now';
+  if (diffH < 24) return `${diffH}h ago`;
+  if (diffD === 1) return 'Yesterday';
+  if (diffD < 7) return `${diffD}d ago`;
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 };
 
 export default Dashboard;
