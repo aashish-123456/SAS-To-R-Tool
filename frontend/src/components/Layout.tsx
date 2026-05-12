@@ -1,6 +1,6 @@
 ﻿import React, { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Settings, UserCircle2, LogOut, KeyRound, ChevronDown } from 'lucide-react';
+import { LayoutDashboard, Settings, UserCircle2, KeyRound, ChevronDown } from 'lucide-react';
 
 interface LayoutProps {
   children: React.ReactNode;
