@@ -7,6 +7,81 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from typing import Dict, Any
+
+from pydantic import EmailStr
+import hashlib
+import random
+import smtplib
+from email.message import EmailMessage
+
+users_db: Dict[str, Any] = {}
+auth_sessions: Dict[str, str] = {}
+pending_otps: Dict[str, Dict[str, Any]] = {}
+
+
+def _hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode('utf-8')).hexdigest()
+
+
+def _generate_otp() -> str:
+    return f"{random.randint(100000, 999999)}"
+
+
+def _send_email_otp(email: str, otp: str, purpose: str) -> None:
+    smtp_host = os.getenv('SMTP_HOST')
+    smtp_port = int(os.getenv('SMTP_PORT', '587'))
+    smtp_user = os.getenv('SMTP_USER')
+    smtp_pass = os.getenv('SMTP_PASS')
+    from_email = os.getenv('SMTP_FROM', smtp_user or 'no-reply@zuality.local')
+
+    if not smtp_host or not smtp_user or not smtp_pass:
+        print(f"[OTP-{purpose}] Email config missing. OTP for {email}: {otp}")
+        return
+
+    msg = EmailMessage()
+    msg['Subject'] = f'Your Zuality OTP ({purpose})'
+    msg['From'] = from_email
+    msg['To'] = email
+    msg.set_content(f'Your OTP is: {otp}. It expires in 10 minutes.')
+
+    with smtplib.SMTP(smtp_host, smtp_port) as server:
+        server.starttls()
+        server.login(smtp_user, smtp_pass)
+        server.send_message(msg)
+
+
+class SignUpRequest(BaseModel):
+    name: str
+    email: EmailStr
+    username: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class VerifyOtpRequest(BaseModel):
+    email: EmailStr
+    otp: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    otp: str
+    new_password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import uuid
@@ -1140,3 +1215,114 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+
+@app.post("/api/v1/auth/signup")
+async def auth_signup(payload: SignUpRequest):
+    key = payload.email.lower()
+    if key in users_db:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    if len(payload.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    users_db[key] = {
+        "name": payload.name,
+        "email": payload.email,
+        "username": payload.username,
+        "password_hash": _hash_password(payload.password),
+        "profile_photo": "",
+        "verified": False,
+    }
+    otp = _generate_otp()
+    pending_otps[key] = {"otp": otp, "purpose": "signup"}
+    _send_email_otp(payload.email, otp, "signup")
+
+    return {"message": "Account created. OTP sent to email.", "requires_otp": True}
+
+
+@app.post("/api/v1/auth/login")
+async def auth_login(payload: LoginRequest):
+    user = next((u for u in users_db.values() if u.get("username") == payload.username), None)
+    if not user or user.get("password_hash") != _hash_password(payload.password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    if not user.get("verified"):
+        otp = _generate_otp()
+        pending_otps[user["email"].lower()] = {"otp": otp, "purpose": "login"}
+        _send_email_otp(user["email"], otp, "login")
+        return {"requires_otp": True, "email": user["email"], "message": "OTP sent to your email."}
+
+    otp = _generate_otp()
+    pending_otps[user["email"].lower()] = {"otp": otp, "purpose": "login"}
+    _send_email_otp(user["email"], otp, "login")
+    return {"requires_otp": True, "email": user["email"], "message": "OTP sent to your email."}
+
+
+@app.post("/api/v1/auth/verify-otp")
+async def auth_verify_otp(payload: VerifyOtpRequest):
+    key = payload.email.lower()
+    item = pending_otps.get(key)
+    if not item or item.get("otp") != payload.otp:
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+
+    pending_otps.pop(key, None)
+    if key in users_db:
+        users_db[key]["verified"] = True
+
+    token = str(uuid.uuid4())
+    auth_sessions[token] = key
+    return {"token": token, "message": "OTP verified successfully."}
+
+
+@app.post("/api/v1/auth/forgot-password")
+async def auth_forgot_password(payload: ForgotPasswordRequest):
+    key = payload.email.lower()
+    if key not in users_db:
+        raise HTTPException(status_code=404, detail="Email not found")
+    otp = _generate_otp()
+    pending_otps[key] = {"otp": otp, "purpose": "reset"}
+    _send_email_otp(payload.email, otp, "reset-password")
+    return {"message": "OTP sent to your email."}
+
+
+@app.post("/api/v1/auth/reset-password")
+async def auth_reset_password(payload: ResetPasswordRequest):
+    key = payload.email.lower()
+    item = pending_otps.get(key)
+    if not item or item.get("otp") != payload.otp:
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+    if key not in users_db:
+        raise HTTPException(status_code=404, detail="Email not found")
+    if len(payload.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    users_db[key]["password_hash"] = _hash_password(payload.new_password)
+    pending_otps.pop(key, None)
+    return {"message": "Password reset successful."}
+
+
+@app.get("/api/v1/auth/me")
+async def auth_me():
+    # Demo fallback until token header is integrated
+    if users_db:
+        user = list(users_db.values())[0]
+        return {"name": user["name"], "email": user["email"], "profile_photo": user.get("profile_photo", "")}
+    return {"name": "Admin User", "email": "admin@example.com", "profile_photo": ""}
+
+
+@app.post("/api/v1/auth/change-password")
+async def auth_change_password(payload: ChangePasswordRequest):
+    if not users_db:
+        raise HTTPException(status_code=400, detail="No user found")
+    user = list(users_db.values())[0]
+    if user["password_hash"] != _hash_password(payload.current_password):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    if len(payload.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    user["password_hash"] = _hash_password(payload.new_password)
+    return {"message": "Password changed successfully."}
+
+
+@app.post("/api/v1/auth/logout")
+async def auth_logout():
+    return {"message": "Logged out successfully."}
