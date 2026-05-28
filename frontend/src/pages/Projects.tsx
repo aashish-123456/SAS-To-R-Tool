@@ -28,7 +28,7 @@ const Projects: React.FC = () => {
         </div>
         <Link
           to="/projects/new"
-          className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors text-sm font-semibold shadow-sm"
+          className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#1f4368] text-white rounded-xl hover:bg-[#1a3654] transition-colors text-sm font-semibold shadow-sm"
         >
           <Plus className="w-4 h-4" />
           New Project
@@ -37,7 +37,7 @@ const Projects: React.FC = () => {
 
       {isLoading ? (
         <div className="flex justify-center items-center py-24">
-          <div className="animate-spin rounded-full h-10 w-10 border-2 border-blue-600 border-t-transparent" />
+          <div className="animate-spin rounded-full h-10 w-10 border-2 border-[#1f4368] border-t-transparent" />
         </div>
       ) : sortedProjects.length === 0 ? (
         <EmptyState />
@@ -68,11 +68,11 @@ const Projects: React.FC = () => {
                 >
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0 group-hover:bg-blue-100 transition-colors">
-                        <FileCode2 className="w-4 h-4 text-blue-600" />
+                      <div className="w-8 h-8 rounded-lg bg-[#eef3f8] flex items-center justify-center flex-shrink-0 group-hover:bg-blue-100 transition-colors">
+                        <FileCode2 className="w-4 h-4 text-[#1f4368]" />
                       </div>
                       <div className="min-w-0">
-                        <p className="font-semibold text-slate-900 text-sm group-hover:text-blue-700 transition-colors truncate">
+                        <p className="font-semibold text-slate-900 text-sm group-hover:text-[#1a3050] transition-colors truncate">
                           {project.name}
                         </p>
                         {project.description && (
@@ -96,7 +96,7 @@ const Projects: React.FC = () => {
                   <td className="px-6 py-4 text-right">
                     <Link
                       to={`/projects/${project.id}`}
-                      className="inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 font-semibold transition-colors"
+                      className="inline-flex items-center gap-1 text-sm text-[#1f4368] hover:text-[#1a3050] font-semibold transition-colors"
                     >
                       Open <ArrowRight className="w-4 h-4" />
                     </Link>
@@ -113,8 +113,8 @@ const Projects: React.FC = () => {
 
 const EmptyState: React.FC = () => (
   <div className="bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col items-center justify-center py-20 text-center px-8">
-    <div className="w-16 h-16 bg-blue-50 rounded-2xl flex items-center justify-center mb-5">
-      <FolderOpen className="w-8 h-8 text-blue-500" />
+    <div className="w-16 h-16 bg-[#eef3f8] rounded-2xl flex items-center justify-center mb-5">
+      <FolderOpen className="w-8 h-8 text-[#1f4368]" />
     </div>
     <h2 className="text-lg font-bold text-slate-900 mb-2">No projects yet</h2>
     <p className="text-sm text-slate-500 mb-6 max-w-sm leading-relaxed">
@@ -122,7 +122,7 @@ const EmptyState: React.FC = () => (
     </p>
     <Link
       to="/projects/new"
-      className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white text-sm font-semibold rounded-xl hover:bg-blue-700 transition-colors shadow-sm"
+      className="inline-flex items-center gap-2 px-5 py-2.5 bg-[#1f4368] text-white text-sm font-semibold rounded-xl hover:bg-[#1a3654] transition-colors shadow-sm"
     >
       <Plus className="w-4 h-4" />
       Create First Project

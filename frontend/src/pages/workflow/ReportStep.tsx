@@ -154,13 +154,13 @@ const ReportStep: React.FC = () => {
       <div className="bg-white border border-gray-200 rounded-xl p-5">
         <div className="flex items-start justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-12 h-12 bg-indigo-600 rounded-xl flex items-center justify-center">
+            <div className="w-12 h-12 bg-[#1f4368] rounded-xl flex items-center justify-center">
               <Code2 className="w-6 h-6 text-white" />
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="text-xl font-bold text-gray-900">Export R Script</h1>
-                <Sparkles className="w-5 h-5 text-indigo-500" />
+                <Sparkles className="w-5 h-5 text-[#1f4368]" />
               </div>
               <p className="text-sm text-gray-500">
                 Production-ready translated R script — reviewed, validated, and ready for deployment.
@@ -169,7 +169,7 @@ const ReportStep: React.FC = () => {
           </div>
           {/* SAS → R diagram */}
           <div className="hidden md:flex items-center gap-2 text-sm">
-            <div className="w-10 h-10 bg-indigo-700 rounded-lg flex items-center justify-center text-white font-bold text-xs">SAS</div>
+            <div className="w-10 h-10 bg-[#1a3654] rounded-lg flex items-center justify-center text-white font-bold text-xs">SAS</div>
             <ArrowRight className="w-4 h-4 text-gray-400" />
             <div className="w-10 h-10 bg-green-600 rounded-lg flex items-center justify-center text-white font-bold text-xs">R</div>
           </div>
@@ -177,7 +177,7 @@ const ReportStep: React.FC = () => {
         <div className="flex gap-3 mt-4">
           <button
             onClick={handleDownload}
-            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 font-medium"
+            className="flex items-center gap-2 px-4 py-2 bg-[#1f4368] text-white rounded-lg text-sm hover:bg-[#1a3654] font-medium"
           >
             <Download className="w-4 h-4" />
             Download R Script
@@ -202,8 +202,8 @@ const ReportStep: React.FC = () => {
       {/* ── Summary cards ── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard
-          icon={<BarChart2 className="w-5 h-5 text-indigo-600" />}
-          iconBg="bg-indigo-50"
+          icon={<BarChart2 className="w-5 h-5 text-[#1f4368]" />}
+          iconBg="bg-[#eef3f8]"
           label="Translation Confidence"
           value={<span className={scoreColor(confidence)}>{confidence.toFixed(1)}%</span>}
           sub={confLabel}
@@ -246,7 +246,7 @@ const ReportStep: React.FC = () => {
                 onClick={() => setActiveTab(t.id)}
                 className={`flex items-center gap-2 px-4 py-3.5 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
                   activeTab === t.id
-                    ? 'border-indigo-600 text-indigo-600'
+                    ? 'border-[#1f4368] text-[#1f4368]'
                     : 'border-transparent text-gray-500 hover:text-gray-700'
                 }`}
               >
@@ -291,7 +291,7 @@ const ReportStep: React.FC = () => {
                   </button>
                   <button
                     onClick={handleDownload}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs hover:bg-indigo-700"
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-[#1f4368] text-white rounded-lg text-xs hover:bg-[#1a3654]"
                   >
                     <Download className="w-3.5 h-3.5" />
                     Download
@@ -423,16 +423,16 @@ const ReportStep: React.FC = () => {
               {(validation?.recommendations ?? []).length > 0 && (
                 <div>
                   <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                    <Sparkles className="w-4 h-4 text-indigo-500" />
+                    <Sparkles className="w-4 h-4 text-[#1f4368]" />
                     AI Recommendations
                   </h3>
                   <div className="space-y-2">
                     {(validation?.recommendations ?? []).map((rec, i) => (
-                      <div key={i} className="flex items-start gap-3 bg-indigo-50 border border-indigo-100 rounded-xl p-4">
-                        <span className="w-5 h-5 bg-indigo-600 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0 mt-0.5">
+                      <div key={i} className="flex items-start gap-3 bg-[#eef3f8] border border-[#ccdce9] rounded-xl p-4">
+                        <span className="w-5 h-5 bg-[#1f4368] rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0 mt-0.5">
                           {i + 1}
                         </span>
-                        <p className="text-sm text-indigo-900">{rec}</p>
+                        <p className="text-sm text-slate-900">{rec}</p>
                       </div>
                     ))}
                   </div>
@@ -454,8 +454,8 @@ const ReportStep: React.FC = () => {
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
                     {packages.map(pkg => (
                       <div key={pkg} className="bg-white border border-gray-200 rounded-xl p-4 flex items-center gap-3">
-                        <div className="w-8 h-8 bg-indigo-50 rounded-lg flex items-center justify-center">
-                          <Package className="w-4 h-4 text-indigo-500" />
+                        <div className="w-8 h-8 bg-[#eef3f8] rounded-lg flex items-center justify-center">
+                          <Package className="w-4 h-4 text-[#1f4368]" />
                         </div>
                         <div>
                           <p className="text-sm font-semibold text-gray-900">{pkg}</p>
@@ -496,12 +496,12 @@ const ReportStep: React.FC = () => {
           {/* ── Tab: Deployment Notes ── */}
           {activeTab === 'deployment' && (
             <div className="space-y-5">
-              <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-5">
-                <h3 className="font-semibold text-indigo-900 mb-1 flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-indigo-600" />
+              <div className="bg-[#eef3f8] border border-[#ccdce9] rounded-xl p-5">
+                <h3 className="font-semibold text-slate-900 mb-1 flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-[#1f4368]" />
                   Script is ready for deployment
                 </h3>
-                <p className="text-sm text-indigo-700">
+                <p className="text-sm text-[#1a3050]">
                   The translated R script has passed semantic equivalence validation with a confidence of{' '}
                   <strong>{confidence.toFixed(1)}%</strong>. Follow the steps below to run it in your environment.
                 </p>
@@ -544,7 +544,7 @@ const ReportStep: React.FC = () => {
                 },
               ].map(item => (
                 <div key={item.step} className="flex gap-4">
-                  <div className="w-8 h-8 bg-indigo-600 rounded-full flex items-center justify-center text-white text-sm font-bold flex-shrink-0 mt-0.5">
+                  <div className="w-8 h-8 bg-[#1f4368] rounded-full flex items-center justify-center text-white text-sm font-bold flex-shrink-0 mt-0.5">
                     {item.step}
                   </div>
                   <div className="flex-1">
@@ -583,7 +583,7 @@ const ReportStep: React.FC = () => {
           </button>
           <button
             onClick={handleDownload}
-            className="flex items-center gap-2 px-5 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 font-medium"
+            className="flex items-center gap-2 px-5 py-2 bg-[#1f4368] text-white rounded-lg text-sm hover:bg-[#1a3654] font-medium"
           >
             <Download className="w-4 h-4" />
             Export R Script

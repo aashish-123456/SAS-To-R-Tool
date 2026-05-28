@@ -48,10 +48,10 @@ const ProjectWorkflow: React.FC = () => {
             return (
               <React.Fragment key={step.id}>
                 <button type="button" onClick={() => navigate(`/projects/${projectId}/${step.path}`)} className="flex flex-col items-center gap-2 relative group cursor-pointer flex-shrink-0 focus:outline-none">
-                  <div className={`w-10 h-10 rounded-full flex items-center justify-center transition-all shadow-sm ${isActive ? 'bg-blue-600 text-white ring-4 ring-blue-100' : isCompleted ? 'bg-emerald-500 text-white hover:bg-emerald-600' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'}`}>
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center transition-all shadow-sm ${isActive ? 'bg-[#1f4368] text-white ring-4 ring-[#ccdce9]' : isCompleted ? 'bg-emerald-500 text-white hover:bg-emerald-600' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'}`}>
                     <Icon className="w-[18px] h-[18px]" />
                   </div>
-                  <span className={`text-[11px] font-semibold text-center leading-tight select-none ${isActive ? 'text-blue-700' : isCompleted ? 'text-emerald-600' : 'text-slate-400'}`}>
+                  <span className={`text-[11px] font-semibold text-center leading-tight select-none ${isActive ? 'text-[#1f4368]' : isCompleted ? 'text-emerald-600' : 'text-slate-400'}`}>
                     {step.label}
                   </span>
                 </button>

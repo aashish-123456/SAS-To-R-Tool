@@ -186,7 +186,7 @@ const InputPreviewStep: React.FC = () => {
         <button
           onClick={handleContinue}
           disabled={uploadMutation.isPending}
-          className="flex-1 flex items-center justify-center gap-2 px-5 py-3.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+          className="flex-1 flex items-center justify-center gap-2 px-5 py-3.5 bg-[#1f4368] hover:bg-[#1a3654] text-white text-sm font-bold rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
         >
           {uploadMutation.isPending ? 'Uploading…' : 'Continue to Translation'}
           {!uploadMutation.isPending && <ArrowRight className="w-4 h-4" />}

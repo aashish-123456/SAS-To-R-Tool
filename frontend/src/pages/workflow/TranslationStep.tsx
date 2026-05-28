@@ -155,9 +155,9 @@ const ENGINE_CONFIG = [
 type ColorKey = 'blue' | 'purple' | 'indigo' | 'emerald' | 'orange' | 'teal';
 
 const COLOR_MAP: Record<ColorKey, { bg: string; border: string; icon: string; badge: string; text: string }> = {
-  blue:    { bg: 'bg-blue-50',    border: 'border-blue-200',   icon: 'text-blue-600',    badge: 'bg-blue-100 text-blue-700',    text: 'text-blue-800' },
+  blue:    { bg: 'bg-[#eef3f8]',    border: 'border-[#ccdce9]',   icon: 'text-[#1f4368]',    badge: 'bg-[#dce8f0] text-[#1a3050]',    text: 'text-blue-800' },
   purple:  { bg: 'bg-purple-50',  border: 'border-purple-200', icon: 'text-purple-600',  badge: 'bg-purple-100 text-purple-700',text: 'text-purple-800' },
-  indigo:  { bg: 'bg-indigo-50',  border: 'border-indigo-200', icon: 'text-indigo-600',  badge: 'bg-indigo-100 text-indigo-700',text: 'text-indigo-800' },
+  indigo:  { bg: 'bg-[#eef3f8]',  border: 'border-[#ccdce9]', icon: 'text-[#1f4368]',  badge: 'bg-[#dce8f0] text-[#1a3050]',text: 'text-[#1f4368]' },
   emerald: { bg: 'bg-emerald-50', border: 'border-emerald-200',icon: 'text-emerald-600', badge: 'bg-emerald-100 text-emerald-700',text: 'text-emerald-800' },
   orange:  { bg: 'bg-orange-50',  border: 'border-orange-200', icon: 'text-orange-600',  badge: 'bg-orange-100 text-orange-700',text: 'text-orange-800' },
   teal:    { bg: 'bg-teal-50',    border: 'border-teal-200',   icon: 'text-teal-600',    badge: 'bg-teal-100 text-teal-700',   text: 'text-teal-800' },
@@ -230,7 +230,7 @@ const ParseDetail: React.FC<{ data: NonNullable<EngineResults['parse']> }> = ({ 
           {Object.entries(data.datasets).map(([ds, role]) => (
             <span key={ds} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 text-xs border border-gray-200">
               <span className="font-mono text-gray-700">{ds}</span>
-              <span className={`text-xs ${role === 'output' ? 'text-green-600' : role === 'input' ? 'text-blue-600' : 'text-purple-600'}`}>
+              <span className={`text-xs ${role === 'output' ? 'text-green-600' : role === 'input' ? 'text-[#1f4368]' : 'text-purple-600'}`}>
                 ({role})
               </span>
             </span>
@@ -257,7 +257,7 @@ const IntentDetail: React.FC<{ data: NonNullable<EngineResults['intent']> }> = (
         <p className="text-xs text-gray-500">Complexity</p>
         <p className={`font-semibold capitalize ${
           data.complexity === 'simple' ? 'text-green-700' :
-          data.complexity === 'moderate' ? 'text-blue-700' :
+          data.complexity === 'moderate' ? 'text-[#1a3050]' :
           data.complexity === 'complex' ? 'text-orange-700' : 'text-red-700'
         }`}>{data.complexity}</p>
       </div>
@@ -306,8 +306,8 @@ const FlowDetail: React.FC<{ data: NonNullable<EngineResults['flow']> }> = ({ da
   <div className="space-y-3 text-sm">
     <div className="flex gap-3 text-xs">
       {data.input_datasets.length > 0 && (
-        <div className="bg-blue-50 rounded border border-blue-100 px-2 py-1">
-          <span className="text-blue-600 font-medium">Inputs: </span>
+        <div className="bg-[#eef3f8] rounded border border-blue-100 px-2 py-1">
+          <span className="text-[#1f4368] font-medium">Inputs: </span>
           <span className="text-blue-800">{data.input_datasets.join(', ')}</span>
         </div>
       )}
@@ -323,9 +323,9 @@ const FlowDetail: React.FC<{ data: NonNullable<EngineResults['flow']> }> = ({ da
       {data.steps.map((step) => (
         <div key={step.order} className="flex gap-3 items-start">
           <div className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white ${
-            step.step_type === 'data_prep' ? 'bg-blue-500' :
+            step.step_type === 'data_prep' ? 'bg-[#eef3f8]0' :
             step.step_type === 'transform' ? 'bg-purple-500' :
-            step.step_type === 'analysis'  ? 'bg-indigo-500' :
+            step.step_type === 'analysis'  ? 'bg-[#eef3f8]0' :
             step.step_type === 'output'    ? 'bg-teal-500' : 'bg-gray-500'
           }`}>
             {step.order}
@@ -334,9 +334,9 @@ const FlowDetail: React.FC<{ data: NonNullable<EngineResults['flow']> }> = ({ da
             <div className="flex items-center gap-2 flex-wrap">
               <span className="font-medium text-gray-800 text-xs">{step.name}</span>
               <span className={`text-xs px-1.5 py-0.5 rounded capitalize ${
-                step.step_type === 'data_prep' ? 'bg-blue-100 text-blue-700' :
+                step.step_type === 'data_prep' ? 'bg-[#dce8f0] text-[#1a3050]' :
                 step.step_type === 'transform' ? 'bg-purple-100 text-purple-700' :
-                step.step_type === 'analysis'  ? 'bg-indigo-100 text-indigo-700' :
+                step.step_type === 'analysis'  ? 'bg-[#dce8f0] text-[#1a3050]' :
                 step.step_type === 'output'    ? 'bg-teal-100 text-teal-700' : 'bg-gray-100 text-gray-700'
               }`}>{step.step_type.replace(/_/g, ' ')}</span>
             </div>
@@ -363,7 +363,7 @@ const PackagesDetail: React.FC<{ data: NonNullable<EngineResults['packages']> }>
         {data.all_packages.map(pkg => (
           <span key={pkg} className={`px-2.5 py-1 rounded-full text-xs font-medium font-mono border ${
             pkg === 'dplyr' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
-            pkg === 'tidyr' ? 'bg-blue-50 text-blue-700 border-blue-200' :
+            pkg === 'tidyr' ? 'bg-[#eef3f8] text-[#1a3050] border-[#ccdce9]' :
             pkg === 'survival' ? 'bg-purple-50 text-purple-700 border-purple-200' :
             pkg === 'base'  ? 'bg-gray-50 text-gray-600 border-gray-200' :
             'bg-orange-50 text-orange-700 border-orange-200'
@@ -482,7 +482,7 @@ const ValidationDetail: React.FC<{ data: NonNullable<EngineResults['validation']
         <div className="bg-white rounded border p-2">
           <div className={`text-sm font-bold capitalize ${
             data.code_complexity === 'simple' ? 'text-green-700' :
-            data.code_complexity === 'moderate' ? 'text-blue-700' :
+            data.code_complexity === 'moderate' ? 'text-[#1a3050]' :
             'text-orange-700'
           }`}>{data.code_complexity}</div>
           <div className="text-xs text-gray-500">Complexity</div>
@@ -520,11 +520,11 @@ const ValidationDetail: React.FC<{ data: NonNullable<EngineResults['validation']
       )}
 
       {data.recommendations.length > 0 && (
-        <div className="bg-blue-50 rounded border border-blue-200 p-3">
+        <div className="bg-[#eef3f8] rounded border border-[#ccdce9] p-3">
           <p className="text-xs font-medium text-blue-800 mb-1">Recommendations:</p>
           <ul className="space-y-0.5">
             {data.recommendations.map((r, i) => (
-              <li key={i} className="text-xs text-blue-700">• {r}</li>
+              <li key={i} className="text-xs text-[#1a3050]">• {r}</li>
             ))}
           </ul>
         </div>
@@ -560,7 +560,7 @@ const EnginePanel: React.FC<EnginePanelProps> = ({ config, engineData, isRunning
   return (
     <div className={`rounded-lg border transition-all duration-300 ${
       isDone  ? `${colors.bg} ${colors.border}` :
-      isRunning ? 'bg-blue-50 border-blue-300 animate-pulse' :
+      isRunning ? 'bg-[#eef3f8] border-[#8aaec9] animate-pulse' :
       'bg-gray-50 border-gray-200'
     }`}>
       <button
@@ -571,11 +571,11 @@ const EnginePanel: React.FC<EnginePanelProps> = ({ config, engineData, isRunning
         {/* Status icon */}
         <div className={`flex-shrink-0 w-9 h-9 rounded-full flex items-center justify-center ${
           isDone  ? `bg-white ${colors.border} border-2` :
-          isRunning ? 'bg-white border-2 border-blue-300' :
+          isRunning ? 'bg-white border-2 border-[#8aaec9]' :
           'bg-white border-2 border-gray-200'
         }`}>
           {isDone    ? <Icon className={`w-4 h-4 ${colors.icon}`} /> :
-           isRunning ? <Loader2 className="w-4 h-4 text-blue-500 animate-spin" /> :
+           isRunning ? <Loader2 className="w-4 h-4 text-[#1f4368] animate-spin" /> :
            <Clock className="w-4 h-4 text-gray-300" />}
         </div>
 
@@ -704,8 +704,8 @@ const TranslationStep: React.FC = () => {
       {/* ── Header card ─────────────────────────────────────────────────────── */}
       <div className="bg-white border border-gray-200 rounded-lg p-6">
         <div className="flex items-center gap-3 mb-4">
-          <div className="w-11 h-11 bg-blue-100 rounded-full flex items-center justify-center">
-            <Code className="w-5 h-5 text-blue-600" />
+          <div className="w-11 h-11 bg-[#dce8f0] rounded-full flex items-center justify-center">
+            <Code className="w-5 h-5 text-[#1f4368]" />
           </div>
           <div className="flex-1">
             <h2 className="text-lg font-semibold text-gray-900">Translation Module</h2>
@@ -731,7 +731,7 @@ const TranslationStep: React.FC = () => {
           <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
             <div
               className={`h-full rounded-full transition-all duration-700 ${
-                isCompleted ? 'bg-green-500' : isFailed ? 'bg-red-500' : 'bg-blue-600'
+                isCompleted ? 'bg-green-500' : isFailed ? 'bg-red-500' : 'bg-[#1f4368]'
               }`}
               style={{ width: `${progress}%` }}
             />
@@ -776,7 +776,7 @@ const TranslationStep: React.FC = () => {
             <h3 className="font-semibold text-gray-900">SAS vs Generated R Code</h3>
             <button
               onClick={handleExportRCode}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#1f4368] text-white rounded-lg hover:bg-[#1a3654] transition-colors text-sm font-medium"
             >
               <Download className="w-3.5 h-3.5" />
               Download R Script
@@ -831,7 +831,7 @@ const TranslationStep: React.FC = () => {
         <button
           onClick={() => navigate(`/projects/${projectId}/execution`)}
           disabled={!isCompleted}
-          className="flex-[2] flex items-center justify-center gap-2 px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm"
+          className="flex-[2] flex items-center justify-center gap-2 px-4 py-3 bg-[#1f4368] text-white rounded-lg hover:bg-[#1a3654] transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm"
         >
           {isCompleted ? (
             <>Continue to Execution <ArrowRight className="w-4 h-4" /></>

@@ -34,7 +34,7 @@ const NewProject: React.FC = () => {
       </Link>
 
       {/* Hero card */}
-      <div className="relative overflow-hidden bg-gradient-to-br from-blue-600 to-blue-700 rounded-2xl p-7 mb-5 text-white shadow-lg">
+      <div className="relative overflow-hidden bg-gradient-to-br from-[#1f4368] to-[#1a3654] rounded-2xl p-7 mb-5 text-white shadow-lg">
         <div className="relative z-10">
           <div className="w-11 h-11 bg-white/20 rounded-xl flex items-center justify-center mb-4 backdrop-blur-sm">
             <Wand2 className="w-5 h-5 text-white" />
@@ -60,7 +60,7 @@ const NewProject: React.FC = () => {
               value={formData.name}
               onChange={(e) => setFormData({ ...formData, name: e.target.value })}
               placeholder="e.g., Clinical Trial Analysis Q3"
-              className="w-full px-4 py-2.5 border border-slate-300 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition"
+              className="w-full px-4 py-2.5 border border-slate-300 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-[#8aaec9] focus:border-transparent outline-none transition"
               required
               autoFocus
             />
@@ -77,7 +77,7 @@ const NewProject: React.FC = () => {
               onChange={(e) => setFormData({ ...formData, description: e.target.value })}
               placeholder="Brief description of what this SAS code does…"
               rows={3}
-              className="w-full px-4 py-2.5 border border-slate-300 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition resize-none"
+              className="w-full px-4 py-2.5 border border-slate-300 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-[#8aaec9] focus:border-transparent outline-none transition resize-none"
             />
           </div>
 
@@ -92,7 +92,7 @@ const NewProject: React.FC = () => {
             <button
               type="submit"
               disabled={!isValid || createProjectMutation.isPending}
-              className="flex-[2] flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm font-bold shadow-sm"
+              className="flex-[2] flex items-center justify-center gap-2 px-4 py-2.5 bg-[#1f4368] text-white rounded-xl hover:bg-[#1a3654] transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm font-bold shadow-sm"
             >
               {createProjectMutation.isPending ? (
                 <>

@@ -110,7 +110,7 @@ const EngineRow: React.FC<{ engine: ValidationEngine; defaultOpen?: boolean }> =
         onClick={() => setOpen(!open)}
       >
         <div className="flex items-center gap-3">
-          <Shield className="w-4 h-4 text-indigo-500 flex-shrink-0" />
+          <Shield className="w-4 h-4 text-[#1f4368] flex-shrink-0" />
           <div>
             <p className="text-sm font-medium text-gray-900">{engine.name}</p>
             <p className="text-xs text-gray-500">{engine.description}</p>
@@ -137,7 +137,7 @@ const ScenarioRow: React.FC<{
   selected: boolean;
 }> = ({ scenario, onSelect, selected }) => (
   <tr
-    className={`border-b border-gray-100 cursor-pointer hover:bg-indigo-50/30 transition-colors ${selected ? 'bg-indigo-50' : ''}`}
+    className={`border-b border-gray-100 cursor-pointer hover:bg-[#eef3f8]/30 transition-colors ${selected ? 'bg-[#eef3f8]' : ''}`}
     onClick={() => onSelect(scenario)}
   >
     <td className="px-4 py-3">
@@ -174,7 +174,7 @@ const CategoryGroup: React.FC<{
         onClick={() => setOpen(!open)}
       >
         <div className="flex items-center gap-3">
-          <Database className="w-4 h-4 text-indigo-500" />
+          <Database className="w-4 h-4 text-[#1f4368]" />
           <span className="text-sm font-semibold text-gray-800">{CATEGORY_DISPLAY[category] ?? category}</span>
           <span className="text-xs text-gray-500">{passedCount}/{total} Passed</span>
         </div>
@@ -223,7 +223,7 @@ const ScenarioDetail: React.FC<{ scenario: ValidationScenario }> = ({ scenario }
       </div>
       <div>
         <p className="text-xs text-gray-500 uppercase tracking-wide mb-0.5">Impact on Score</p>
-        <p className="font-semibold text-indigo-600">{scenario.impact.toFixed(1)}%</p>
+        <p className="font-semibold text-[#1f4368]">{scenario.impact.toFixed(1)}%</p>
       </div>
       {scenario.detail && (
         <div>
@@ -321,7 +321,7 @@ const ValidationStep: React.FC = () => {
   if (isLoading) {
     return (
       <div className="flex flex-col items-center justify-center py-24 gap-4">
-        <div className="w-14 h-14 rounded-full border-4 border-indigo-600 border-t-transparent animate-spin" />
+        <div className="w-14 h-14 rounded-full border-4 border-[#1f4368] border-t-transparent animate-spin" />
         <p className="text-gray-600 font-medium">Running semantic equivalence validation…</p>
         <p className="text-sm text-gray-400">Comparing SAS logic, statistics, and execution semantics</p>
       </div>
@@ -353,7 +353,7 @@ const ValidationStep: React.FC = () => {
             <div>
               <div className="flex items-center gap-2 mb-1">
                 <h1 className="text-xl font-bold text-gray-900">Validation & Reconciliation</h1>
-                <Sparkles className="w-5 h-5 text-indigo-500" />
+                <Sparkles className="w-5 h-5 text-[#1f4368]" />
               </div>
               <p className="text-sm text-gray-500">AI-powered semantic equivalence validation for SAS → R clinical migration.</p>
             </div>
@@ -361,9 +361,9 @@ const ValidationStep: React.FC = () => {
           <div className="flex items-center gap-3">
             {/* SAS → Validate → R diagram */}
             <div className="hidden md:flex items-center gap-2">
-              <div className="w-10 h-10 bg-indigo-700 rounded-lg flex items-center justify-center text-white font-bold text-xs">SAS</div>
+              <div className="w-10 h-10 bg-[#1a3654] rounded-lg flex items-center justify-center text-white font-bold text-xs">SAS</div>
               <ArrowRight className="w-4 h-4 text-gray-400" />
-              <div className="w-10 h-10 bg-indigo-600 rounded-lg flex items-center justify-center">
+              <div className="w-10 h-10 bg-[#1f4368] rounded-lg flex items-center justify-center">
                 <Shield className="w-5 h-5 text-white" />
               </div>
               <ArrowRight className="w-4 h-4 text-gray-400" />
@@ -375,7 +375,7 @@ const ValidationStep: React.FC = () => {
         <div className="flex gap-3 mt-4">
           <button
             onClick={() => refetch()}
-            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 font-medium"
+            className="flex items-center gap-2 px-4 py-2 bg-[#1f4368] text-white rounded-lg text-sm hover:bg-[#1a3654] font-medium"
           >
             <RefreshCw className="w-4 h-4" />
             Re-run Validation
@@ -397,7 +397,7 @@ const ValidationStep: React.FC = () => {
         {/* Datasets */}
         <div className="bg-white border border-gray-200 rounded-xl p-5">
           <div className="flex items-center gap-2 mb-2">
-            <Database className="w-5 h-5 text-indigo-500" />
+            <Database className="w-5 h-5 text-[#1f4368]" />
             <p className="text-sm font-medium text-gray-700">Datasets Validated</p>
           </div>
           <p className="text-3xl font-bold text-gray-900 mb-2">{v.datasets_validated ?? 0}</p>
@@ -466,7 +466,7 @@ const ValidationStep: React.FC = () => {
                 onClick={() => setActiveTab(t.id)}
                 className={`flex items-center gap-2 px-4 py-3.5 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
                   activeTab === t.id
-                    ? 'border-indigo-600 text-indigo-600'
+                    ? 'border-[#1f4368] text-[#1f4368]'
                     : 'border-transparent text-gray-500 hover:text-gray-700'
                 }`}
               >
@@ -517,7 +517,7 @@ const ValidationStep: React.FC = () => {
                       onClick={() => setFilterStatus(fs)}
                       className={`px-3 py-1 rounded-full text-sm font-medium border transition-colors ${
                         filterStatus === fs
-                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          ? 'bg-[#1f4368] text-white border-[#1f4368]'
                           : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
                       }`}
                     >
@@ -531,13 +531,13 @@ const ValidationStep: React.FC = () => {
                       placeholder="Search scenarios..."
                       value={searchQuery}
                       onChange={e => setSearchQuery(e.target.value)}
-                      className="pl-9 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                      className="pl-9 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#8aaec9]"
                     />
                   </div>
                   <select
                     value={filterSection}
                     onChange={e => setFilterSection(e.target.value)}
-                    className="text-sm border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                    className="text-sm border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-[#8aaec9]"
                   >
                     <option value="all">All Sections</option>
                     {CATEGORY_ORDER.map(c => (
@@ -591,7 +591,7 @@ const ValidationStep: React.FC = () => {
             <div className="grid grid-cols-2 gap-5">
               <div>
                 <div className="flex items-center gap-2 mb-2">
-                  <div className="w-6 h-6 bg-indigo-700 rounded flex items-center justify-center text-white text-xs font-bold">S</div>
+                  <div className="w-6 h-6 bg-[#1a3654] rounded flex items-center justify-center text-white text-xs font-bold">S</div>
                   <h3 className="font-semibold text-gray-900">SAS Output (Simulated)</h3>
                 </div>
                 <pre className="bg-gray-900 text-green-300 text-xs rounded-xl p-4 h-96 overflow-auto whitespace-pre-wrap leading-relaxed font-mono">
@@ -608,12 +608,12 @@ const ValidationStep: React.FC = () => {
                 </pre>
               </div>
               {/* Numeric comparison stat */}
-              <div className="col-span-2 bg-indigo-50 border border-indigo-100 rounded-xl p-4">
+              <div className="col-span-2 bg-[#eef3f8] border border-[#ccdce9] rounded-xl p-4">
                 <div className="flex items-center gap-3">
-                  <Activity className="w-5 h-5 text-indigo-600" />
+                  <Activity className="w-5 h-5 text-[#1f4368]" />
                   <div>
-                    <p className="font-medium text-indigo-900">Numeric Agreement</p>
-                    <p className="text-sm text-indigo-700">
+                    <p className="font-medium text-slate-900">Numeric Agreement</p>
+                    <p className="text-sm text-[#1a3050]">
                       Overall match rate: <strong>{Math.round(confidence)}%</strong> — within ±0.0001 tolerance
                     </p>
                   </div>
@@ -669,7 +669,7 @@ const ValidationStep: React.FC = () => {
           {activeTab === 'recommendations' && (
             <div className="space-y-4">
               <div className="flex items-center gap-2 mb-2">
-                <Sparkles className="w-5 h-5 text-indigo-500" />
+                <Sparkles className="w-5 h-5 text-[#1f4368]" />
                 <h2 className="font-semibold text-gray-900">AI Recommendations</h2>
               </div>
               {(v.recommendations ?? []).length === 0 ? (
@@ -680,12 +680,12 @@ const ValidationStep: React.FC = () => {
                 </div>
               ) : (
                 (v.recommendations ?? []).map((rec, i) => (
-                  <div key={i} className="bg-indigo-50 border border-indigo-100 rounded-xl p-4">
+                  <div key={i} className="bg-[#eef3f8] border border-[#ccdce9] rounded-xl p-4">
                     <div className="flex items-start gap-3">
-                      <div className="w-6 h-6 bg-indigo-600 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0 mt-0.5">
+                      <div className="w-6 h-6 bg-[#1f4368] rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0 mt-0.5">
                         {i + 1}
                       </div>
-                      <p className="text-sm text-indigo-900 leading-relaxed">{rec}</p>
+                      <p className="text-sm text-slate-900 leading-relaxed">{rec}</p>
                     </div>
                   </div>
                 ))
@@ -748,7 +748,7 @@ const ValidationStep: React.FC = () => {
           </button>
           <button
             onClick={() => navigate(`/projects/${projectId}/report`)}
-            className="flex items-center gap-2 px-5 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 font-medium"
+            className="flex items-center gap-2 px-5 py-2 bg-[#1f4368] text-white rounded-lg text-sm hover:bg-[#1a3654] font-medium"
           >
             Proceed to Export
             <ArrowRight className="w-4 h-4" />

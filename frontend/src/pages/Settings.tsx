@@ -59,7 +59,7 @@ const Settings: React.FC = () => {
               type="password"
               value={currentPassword}
               onChange={(e) => setCurrentPassword(e.target.value)}
-              className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#8aaec9] focus:border-transparent outline-none"
             />
           </div>
 
@@ -69,7 +69,7 @@ const Settings: React.FC = () => {
               type="password"
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
-              className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#8aaec9] focus:border-transparent outline-none"
             />
           </div>
 
@@ -79,7 +79,7 @@ const Settings: React.FC = () => {
               type="password"
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
-              className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#8aaec9] focus:border-transparent outline-none"
             />
           </div>
 
@@ -89,7 +89,7 @@ const Settings: React.FC = () => {
           <button
             type="submit"
             disabled={changePasswordMutation.isPending}
-            className="px-4 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+            className="px-4 py-2.5 bg-[#1f4368] text-white rounded-lg hover:bg-[#1a3654] transition-colors font-medium"
           >
             {changePasswordMutation.isPending ? 'Updating...' : 'Change Password'}
           </button>
