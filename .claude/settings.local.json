@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(venv/Scripts/python.exe -c ' *)",
+      "Bash(python -c ' *)",
+      "Bash(npx tsc *)",
+      "Bash(npx vite *)",
+      "PowerShell(cd \"c:\\\\Users\\\\aashish\\\\Downloads\\\\sas-r-converter\"; $env:PYTHONIOENCODING=\"utf-8\"; .\\\\.venv\\\\Scripts\\\\python.exe test_dynamic.py 2>&1)",
+      "PowerShell(\\(Get-Command uvicorn\\).Source)"
+    ]
+  }
+}

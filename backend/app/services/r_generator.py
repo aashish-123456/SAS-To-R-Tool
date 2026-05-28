@@ -24,6 +24,7 @@ class RCodeGenerator:
         self._reset_state()
         self.inline_data = inline_data or []
         self.inline_data_idx = 0
+        self._build_var_case_map(ast)
         self._emit_header()
         for node in ast:
             self._process(node)
@@ -38,12 +39,7 @@ class RCodeGenerator:
         # current context
         self.current_proc: Optional[str] = None
         self.current_dataset: Optional[str] = None
-        self.proc_opts: Dict[str, str] = {}
-        self.stat_opts: List[str] = []
         self.input_vars: List[Dict[str, str]] = []
-        self.analyze_vars: List[str] = []
-        self.class_vars: List[str] = []
-        self.by_vars: List[str] = []
         self.by_desc: bool = False
         self.by_var_desc: List[bool] = []
         self.table_vars: List[str] = []
@@ -57,6 +53,94 @@ class RCodeGenerator:
         self.current_model: Dict[str, Any] = {}
         self.current_means_stmt: Dict[str, Any] = {}
         self.current_title: Optional[str] = None
+        # libname tracking (libref → path)
+        self._libname_map: Dict[str, str] = {}
+        # ARRAY definitions: name → list of variable names
+        self._arrays: Dict[str, List[str]] = {}
+        # Active indexed DO loop context
+        self._do_loop_active: bool = False
+        self._do_loop_var: str = ''
+        self._do_loop_from: str = '1'
+        self._do_loop_to: str = 'n'
+        self._do_loop_by: str = '1'
+        self._do_loop_body: List[str] = []   # raw R ops collected inside the loop
+        # DO-block state (handles IF ... THEN DO; ... END; ELSE DO; ... END;)
+        self._do_phase: int = 0          # 0=none, 1=collecting if-do, 2=collecting else-do
+        self._do_condition: str = ''
+        self._if_do_body: List[tuple] = []    # (var, expr) pairs in IF branch
+        self._else_do_body: List[tuple] = []  # (var, expr) pairs in ELSE branch
+        # Pending MERGE context (populated by merge node, used when RUN is hit)
+        self._pending_merge: Optional[Dict] = None
+        # Datasets created in this script (skip re-reading from disk via haven)
+        self._created_datasets: set = set()
+        # Buffered column assignments — flushed as a single mutate() before non-mutate ops
+        self._pending_mutations: List[tuple] = []
+        # Variable canonical-case map: lowercase_name → as-declared name (for case normalisation)
+        self._var_case: Dict[str, str] = {}
+        # PROC SQL state
+        self._in_proc_sql: bool = False
+        self._sql_statements: List[str] = []
+        # Initialise proc context (so all attributes exist from the very first call)
+        self._reset_proc_ctx()
+
+    # ── variable case normalisation ───────────────────────────────────────
+
+    def _build_var_case_map(self, ast: List[Dict[str, Any]]) -> None:
+        """Pre-scan AST to collect canonical (as-declared) variable names."""
+        for node in ast:
+            t = node.get('type', '')
+            if t == 'input':
+                for v in node.get('variables', []):
+                    name = v.get('name', '') if isinstance(v, dict) else str(v)
+                    if name and re.match(r'^[A-Za-z_]\w*$', name):
+                        self._var_case[name.lower()] = name
+            elif t == 'assignment':
+                name = node.get('variable', '')
+                if name and re.match(r'^[A-Za-z_]\w*$', name):
+                    self._var_case.setdefault(name.lower(), name)
+            elif t == 'retain':
+                for v in node.get('variables', []):
+                    name = v.get('name', '') if isinstance(v, dict) else str(v)
+                    if name and re.match(r'^[A-Za-z_]\w*$', name):
+                        self._var_case.setdefault(name.lower(), name)
+
+    def _canonicalize_vars(self, expr: str) -> str:
+        """Replace lowercase variable references with their canonical declared case."""
+        if not self._var_case:
+            return expr
+        # Split on quoted strings so we don't touch string literals
+        parts = re.split(r'("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\')', expr)
+        result = []
+        for i, part in enumerate(parts):
+            if i % 2 == 1:  # inside quotes
+                result.append(part)
+            else:
+                for lower, canonical in self._var_case.items():
+                    if lower != canonical:
+                        part = re.sub(rf'\b{re.escape(lower)}\b', canonical, part)
+                result.append(part)
+        return ''.join(result)
+
+    # ── mutation buffer ───────────────────────────────────────────────────
+
+    def _flush_mutations(self):
+        """Emit buffered column assignments as a single batched mutate() call."""
+        if not self._pending_mutations or not self.current_dataset:
+            self._pending_mutations = []
+            return
+        ds = self.current_dataset
+        if len(self._pending_mutations) == 1:
+            v, e = self._pending_mutations[0]
+            self.pending_data_ops += [f"{ds} <- {ds} %>%", f"  mutate({v} = {e})"]
+        else:
+            parts = [f"    {v} = {e}" for v, e in self._pending_mutations]
+            self.pending_data_ops += (
+                [f"{ds} <- {ds} %>%", "  mutate("]
+                + [p + "," for p in parts[:-1]]
+                + [parts[-1]]
+                + ["  )"]
+            )
+        self._pending_mutations = []
 
     def _reset_proc_ctx(self):
         self.proc_opts = {}
@@ -67,33 +151,71 @@ class RCodeGenerator:
         self.by_desc = False
         self.by_var_desc: List[bool] = []
         self.table_vars = []
+        self.column_vars: List[str] = []
         self.current_model = {}
         self.current_means_stmt = {}
         self.current_title = None
         self.where_condition: Optional[str] = None
         self.data_has_set = False
+        self.random_vars: List[str] = []
+        self.strata_vars: List[str] = []
+        self.time_stmt: str = ''
+        self.lsmeans_effects: List[str] = []
+        self.rename_pairs: Dict[str, str] = {}
+        self.label_pairs: Dict[str, str] = {}
+        self.transpose_id_var: str = ''
 
     # ── node dispatcher ───────────────────────────────────────────────────
 
     def _process(self, node: Dict[str, Any]):
         t = node.get('type', '')
 
-        if t == 'data_step':
+        if t == 'libname':
+            self._emit_libname(node)
+
+        elif t == 'data_step':
             self.current_dataset = node.get('dataset', 'data')
             self.current_proc = 'data'
             self.input_vars = []
             self.data_step_active = False
             self.pending_data_ops = []
             self.pending_post_data_ops = []
+            self._pending_merge = None
             self._reset_proc_ctx()
 
+        elif t == 'merge':
+            self._pending_merge = node
+
         elif t == 'set':
+            full_datasets = node.get('full_datasets', node.get('datasets', []))
             datasets = node.get('datasets') or [node.get('dataset', 'data')]
+            # Emit haven::read_sas() for datasets with a known libname path
+            for full_name, name in zip(full_datasets, datasets):
+                if '.' in str(full_name):
+                    lib, ds = str(full_name).split('.', 1)
+                    # Skip read_sas if this dataset was already created earlier in the script
+                    if name in self._created_datasets:
+                        continue
+                    path = self._libname_map.get(lib.lower())
+                    if path:
+                        self.lines.append(
+                            f'{name} <- haven::read_sas(file.path("{path}", "{ds.lower()}.sas7bdat"))'
+                        )
             if len(datasets) > 1:
                 self.lines.append(f"{self.current_dataset} <- bind_rows({', '.join(datasets)})")
             else:
                 self.lines.append(f"{self.current_dataset} <- {datasets[0]}")
             self.data_has_set = True
+
+        elif t == 'do_block_start':
+            # IF ... THEN DO — handled via _do_phase in if_statement
+            pass
+
+        elif t == 'do_block_end':
+            self._handle_do_end()
+
+        elif t == 'format_stmt':
+            self.lines.append(f"# NOTE: SAS FORMAT statement (display-only, no R equivalent): {node.get('declaration', '')}")
 
         elif t == 'input':
             self.input_vars = node.get('variables', [])
@@ -108,6 +230,30 @@ class RCodeGenerator:
             self._emit_assignment(node)
 
         elif t == 'if_statement':
+            # Detect "if a;" / "if a and b;" merge subsetting conditions
+            cond_raw = (node.get('condition') or '').strip()
+            if self._pending_merge and node.get('then_clause') is None:
+                lo_cond = cond_raw.lower()
+                in_vars = {
+                    d.get('in_var', '').lower()
+                    for d in self._pending_merge.get('datasets', [])
+                    if d.get('in_var')
+                }
+                if lo_cond in in_vars:
+                    # "if a;" — keep only records from first dataset → left_join
+                    self._pending_merge['join_type'] = 'left_join'
+                    self._pending_merge['primary_in_var'] = lo_cond
+                    return
+                m_and = re.match(r'^(\w+)\s+(?:and|&)\s+(\w+)$', lo_cond, re.I)
+                if m_and and {m_and.group(1), m_and.group(2)} <= in_vars:
+                    # "if a and b;" — keep only matched rows → inner_join
+                    self._pending_merge['join_type'] = 'inner_join'
+                    return
+                m_not = re.match(r'^not\s+(\w+)$', lo_cond, re.I)
+                if m_not and m_not.group(1) in in_vars:
+                    # "if not b;" — rows not in second dataset → anti_join
+                    self._pending_merge['join_type'] = 'anti_join'
+                    return
             self._start_if_chain(node)
 
         elif t == 'else_if_statement':
@@ -137,7 +283,7 @@ class RCodeGenerator:
             self.current_proc = 'proc_means'
             self.proc_opts = node.get('options', {})
             self.stat_opts = node.get('stat_options',
-                                       ['n', 'mean', 'std', 'min', 'max'])
+                                       ['n', 'mean', 'median', 'std', 'min', 'max', 'sum'])
             self.analyze_vars = []
             self.class_vars = []
 
@@ -178,7 +324,8 @@ class RCodeGenerator:
             self._flush_if_chain()
             self.current_proc = 'proc_sql'
             self.proc_opts = node.get('options', {})
-            self.lines.append("# PROC SQL – translate manually or use dplyr joins")
+            self._in_proc_sql = True
+            self._sql_statements = []
 
         elif t == 'proc_fcmp':
             self._flush_if_chain()
@@ -188,6 +335,61 @@ class RCodeGenerator:
         elif t == 'proc_transpose':
             self._flush_if_chain()
             self.current_proc = 'proc_transpose'
+            self.proc_opts = node.get('options', {})
+
+        elif t == 'proc_logistic':
+            self._flush_if_chain()
+            self.current_proc = 'proc_logistic'
+            self.proc_opts = node.get('options', {})
+
+        elif t == 'proc_mixed':
+            self._flush_if_chain()
+            self.current_proc = 'proc_mixed'
+            self.proc_opts = node.get('options', {})
+
+        elif t == 'proc_phreg':
+            self._flush_if_chain()
+            self.current_proc = 'proc_phreg'
+            self.proc_opts = node.get('options', {})
+
+        elif t == 'proc_lifetest':
+            self._flush_if_chain()
+            self.current_proc = 'proc_lifetest'
+            self.proc_opts = node.get('options', {})
+
+        elif t == 'proc_report':
+            self._flush_if_chain()
+            self.current_proc = 'proc_report'
+            self.proc_opts = node.get('options', {})
+
+        elif t == 'proc_tabulate':
+            self._flush_if_chain()
+            self.current_proc = 'proc_tabulate'
+            self.proc_opts = node.get('options', {})
+
+        elif t == 'proc_compare':
+            self._flush_if_chain()
+            self.current_proc = 'proc_compare'
+            self.proc_opts = node.get('options', {})
+
+        elif t == 'proc_contents':
+            self._flush_if_chain()
+            self.current_proc = 'proc_contents'
+            self.proc_opts = node.get('options', {})
+
+        elif t == 'proc_univariate':
+            self._flush_if_chain()
+            self.current_proc = 'proc_univariate'
+            self.proc_opts = node.get('options', {})
+
+        elif t == 'proc_corr':
+            self._flush_if_chain()
+            self.current_proc = 'proc_corr'
+            self.proc_opts = node.get('options', {})
+
+        elif t == 'proc_import':
+            self._flush_if_chain()
+            self.current_proc = 'proc_import'
             self.proc_opts = node.get('options', {})
 
         elif t == 'model':
@@ -208,10 +410,101 @@ class RCodeGenerator:
         elif t == 'tables':
             self.table_vars = node.get('variables', [])
 
+        elif t == 'random':
+            self.random_vars = node.get('variables', [])
+
+        elif t == 'strata':
+            self.strata_vars = node.get('variables', [])
+
+        elif t == 'time_stmt':
+            self.time_stmt = node.get('declaration', '')
+
+        elif t == 'column':
+            self.column_vars = node.get('variables', [])
+
+        elif t == 'lsmeans':
+            self.lsmeans_effects.append(node.get('effect', ''))
+
+        elif t == 'rename':
+            pairs = node.get('pairs', {})
+            if self.current_proc == 'data' and self.current_dataset and pairs:
+                renames = ', '.join(f'{old} = {new}' for old, new in pairs.items())
+                op = [
+                    f"{self.current_dataset} <- {self.current_dataset} %>%",
+                    f"  rename({renames})",
+                ]
+                self.pending_data_ops.extend(op)
+            self.rename_pairs = pairs
+
+        elif t == 'label_stmt':
+            # SAS labels → set_variable_labels via labelled package (no-op if not used)
+            decl = node.get('declaration', '')
+            self.lines.append(f"# LABEL: {decl}  # (see labelled::var_label() for R equivalent)")
+
+        elif t in ('ods_stmt', 'informat_stmt', 'attrib_stmt'):
+            # These have no R equivalents; annotate silently
+            pass
+
+        elif t == 'repeated':
+            # PROC MIXED REPEATED — complex covariance structure
+            self.lines.append(f"# REPEATED: {node.get('declaration', '')} - set correlation structure in lme4/nlme")
+
+        elif t in ('hazardratio', 'estimate_stmt', 'contrast'):
+            # These map to post-model summaries
+            decl = node.get('declaration', '')
+            t_names = {'hazardratio': 'HAZARDRATIO', 'estimate_stmt': 'ESTIMATE', 'contrast': 'CONTRAST'}
+            self.lines.append(f"# {t_names.get(t, t.upper())}: {decl}")
+
         elif t == 'by':
             self.by_vars = node.get('variables', [])
             self.by_desc = node.get('descending', False)
             self.by_var_desc = node.get('var_descending', [])
+
+        elif t == 'array_def':
+            arr_name = node.get('name', 'arr')
+            variables = node.get('variables', [])
+            self._arrays[arr_name] = variables
+            # Emit a comment annotation; actual R is emitted when DO loop body is flushed
+            comment = f"# ARRAY {arr_name}: {variables}"
+            if self.current_proc == 'data' and self.current_dataset:
+                self.pending_data_ops.append(comment)
+            else:
+                self.lines.append(comment)
+
+        elif t == 'do_loop':
+            self._do_loop_active = True
+            self._do_loop_var   = node.get('var', 'i')
+            self._do_loop_from  = self._sas2r(node.get('from_val', '1'))
+            self._do_loop_to    = self._sas2r(node.get('to_val', 'n'))
+            self._do_loop_by    = self._sas2r(node.get('by_val', '1'))
+            self._do_loop_body  = []
+
+        elif t == 'do_while':
+            cond = self._sas2r(node.get('condition', 'TRUE'))
+            kind = node.get('kind', 'while')
+            if kind == 'while':
+                lines_block = [f"while ({cond}) {{"]
+            else:
+                lines_block = [f"repeat {{  # DO UNTIL ({cond})"]
+            if self.current_proc == 'data' and self.current_dataset:
+                self.pending_data_ops.extend(lines_block)
+            else:
+                self.lines.extend(lines_block)
+
+        elif t == 'retain':
+            # Translate to cumulative initialisation comment; actual cumsum logic
+            # is handled in the mutate pipeline when the variable is assigned.
+            init_vals = node.get('init_values', {})
+            for var, init in init_vals.items():
+                comment = f"# RETAIN: {var} initialised to {init} (use cumsum/lag for running totals)"
+                if self.current_proc == 'data' and self.current_dataset:
+                    self.pending_data_ops.append(comment)
+                else:
+                    self.lines.append(comment)
+
+        elif t == 'id_stmt':
+            # PROC TRANSPOSE — variable whose values become column names
+            self.transpose_id_var = node.get('variable', '')
 
         elif t in ('run', 'quit'):
             self._flush_if_chain()
@@ -219,13 +512,34 @@ class RCodeGenerator:
 
         elif t == 'unknown':
             stmt = node.get('statement', '').strip()
-            if stmt:
-                self.lines.append(f"# TODO: Untranslated SAS statement: {stmt}")
+            # Silently skip PROC IMPORT auxiliary options (not real statements)
+            if stmt.lower().startswith(('getnames', 'replace', 'sheet=')):
+                return
+            if self._in_proc_sql and stmt:
+                self._sql_statements.append(stmt)
+            elif stmt:
+                self.lines.append(f"# NOTE: SAS-specific statement (review manually): {stmt}")
 
     # ── RUN handler – deferred emit ───────────────────────────────────────
 
     def _handle_run(self):
         if self.current_proc == 'data':
+            # Flush any incomplete DO block that never got an else
+            if self._do_phase == 1 and self._if_do_body:
+                self._flush_mutations()
+                for var, expr in self._if_do_body:
+                    self.pending_data_ops.append(f"{self.current_dataset} <- {self.current_dataset} %>%")
+                    self.pending_data_ops.append(f"  mutate({var} = if_else({self._do_condition}, {expr}, NA))")
+                self._do_phase = 0
+                self._if_do_body = []
+
+            # Flush buffered mutations before the merge join (so ordering is correct)
+            self._flush_mutations()
+
+            # Emit MERGE → join before other data ops
+            if self._pending_merge:
+                self._emit_merge_at_run()
+
             if self.data_step_active:
                 self._emit_data_step()
             elif self.current_dataset:
@@ -237,6 +551,7 @@ class RCodeGenerator:
                         not self.input_vars
                         and not self.inline_data
                         and not self.data_has_set
+                        and not self._pending_merge
                     )
                     if needs_seed:
                         self.lines.append(f"{self.current_dataset} <- data.frame(.row = 1)")
@@ -248,7 +563,13 @@ class RCodeGenerator:
                 if self.pending_post_data_ops:
                     self.lines.extend(self.pending_post_data_ops)
                     self.pending_post_data_ops = []
-                self._emit_info_print(self.current_dataset)
+                # Only emit row/col NOTE — no auto-print for SET-based steps
+                ds = self.current_dataset
+                self._created_datasets.add(ds)
+                self.lines.append(
+                    f"cat(sprintf('NOTE: Dataset {ds.upper()} has %d observations "
+                    f"and %d variables.\\n', nrow({ds}), ncol({ds})))"
+                )
         elif self.current_proc == 'proc_means':
             self._emit_proc_means()
         elif self.current_proc == 'proc_freq':
@@ -265,9 +586,34 @@ class RCodeGenerator:
             self._emit_proc_glm()
         elif self.current_proc == 'proc_export':
             self._emit_proc_export()
+        elif self.current_proc == 'proc_logistic':
+            self._emit_proc_logistic()
+        elif self.current_proc == 'proc_mixed':
+            self._emit_proc_mixed()
+        elif self.current_proc == 'proc_phreg':
+            self._emit_proc_phreg()
+        elif self.current_proc == 'proc_lifetest':
+            self._emit_proc_lifetest()
+        elif self.current_proc == 'proc_report':
+            self._emit_proc_report()
+        elif self.current_proc == 'proc_tabulate':
+            self._emit_proc_tabulate()
+        elif self.current_proc == 'proc_compare':
+            self._emit_proc_compare()
+        elif self.current_proc == 'proc_contents':
+            self._emit_proc_contents()
+        elif self.current_proc == 'proc_univariate':
+            self._emit_proc_univariate()
+        elif self.current_proc == 'proc_corr':
+            self._emit_proc_corr()
+        elif self.current_proc == 'proc_import':
+            self._emit_proc_import()
+        elif self.current_proc == 'proc_sql':
+            self._emit_proc_sql()
 
         self.lines.append('')
         self.current_proc = None
+        self._in_proc_sql = False
         self._reset_proc_ctx()
 
     # ── emitters ──────────────────────────────────────────────────────────
@@ -326,7 +672,7 @@ class RCodeGenerator:
         self.lines.append(
             f"cat(sprintf('NOTE: Dataset {ds.upper()} has %d observations "
             f"and %d variables.\\n', nrow({ds}), ncol({ds})))")
-        self.lines.append(f"print(as.data.frame({ds}), row.names = FALSE)")
+        self.lines.append(f"head({ds})")
         self.data_step_active = False
 
     def _next_inline_block(self) -> List[List[str]]:
@@ -348,14 +694,49 @@ class RCodeGenerator:
         self.lines.append(
             f"cat(sprintf('NOTE: Dataset {ds.upper()} has %d observations "
             f"and %d variables.\\n', nrow({ds}), ncol({ds})))")
-        self.lines.append(f"print(as.data.frame({ds}), row.names = FALSE)")
+        self.lines.append(f"head({ds})")
+
+    # SAS PROC options that masquerade as assignments — never emit as R code
+    _PROC_OPTION_VARS = frozenset({
+        'getnames', 'replace', 'sheet', 'mixed', 'dbms', 'out', 'outfile',
+        'datafile', 'delimiter', 'obs', 'firstobs', 'guessingrows',
+    })
+
+    # Date-variable suffix pattern for detecting date arithmetic (DT/DTM/DATE endings)
+    _DT_ARITH_RE = re.compile(
+        r'\b(\w*(?:DT|DTM|DTE|DATE))\s*-\s*(\w*(?:DT|DTM|DTE|DATE))\b', re.I
+    )
+
+    def _wrap_date_arith(self, expr: str) -> str:
+        """Wrap DT - DT subtraction with as.numeric() to return days, not difftime."""
+        return self._DT_ARITH_RE.sub(
+            lambda m: f"as.numeric({m.group(1)} - {m.group(2)})", expr
+        )
 
     def _emit_assignment(self, node: Dict[str, Any]):
         var = node.get('variable', '')
         expr = self._sas2r(node.get('expression', ''))
+
+        # Skip PROC option keywords that the parser captures as assignments
+        if var.lower() in self._PROC_OPTION_VARS and self.current_proc not in (None, 'data'):
+            return
+
+        # Intercept assignments inside indexed DO loops
+        if self._do_loop_active:
+            self._do_loop_body.append(f"{var} = {expr}")
+            return
+
+        # Intercept assignments inside IF-THEN DO / ELSE DO blocks
+        if self._do_phase == 1:
+            self._if_do_body.append((var, expr))
+            return
+        if self._do_phase == 2:
+            self._else_do_body.append((var, expr))
+            return
+
         if self.current_proc == 'data' and self.current_dataset:
-            self.pending_data_ops.append(f"{self.current_dataset} <- {self.current_dataset} %>%")
-            self.pending_data_ops.append(f"  mutate({var} = {expr})")
+            # Buffer for batching into a single mutate() at flush time
+            self._pending_mutations.append((var, expr))
         else:
             self.lines.append(f"{var} <- {expr}")
 
@@ -385,6 +766,16 @@ class RCodeGenerator:
                 self.lines.extend(op_lines)
 
     def _start_if_chain(self, node: Dict[str, Any]):
+        # Reset any leftover DO-block state from a previous incomplete chain
+        self._do_phase = 0
+        self._do_condition = ''
+        self._if_do_body = []
+        self._else_do_body = []
+        then_clause = (node.get('then_clause') or '').strip().lower()
+        if then_clause == 'do':
+            # Start collecting assignments into the IF do-body
+            self._do_phase = 1
+            self._do_condition = self._sas2r(node.get('condition', ''))
         self.pending_if_chain = [node]
 
     def _extend_if_chain(self, node: Dict[str, Any]):
@@ -394,16 +785,214 @@ class RCodeGenerator:
         self.pending_if_chain.append(node)
 
     def _close_if_chain_with_else(self, node: Dict[str, Any]):
+        clause = (node.get('clause') or '').strip().lower()
+        if clause == 'do':
+            # Start collecting assignments into the ELSE do-body
+            self._do_phase = 2
+            self.pending_if_chain.append(node)
+            return   # don't flush yet — wait for the closing END
         if not self.pending_if_chain:
             self.pending_if_chain = [node]
-            return
-        self.pending_if_chain.append(node)
+        else:
+            self.pending_if_chain.append(node)
         self._flush_if_chain()
+
+    def _handle_do_end(self):
+        """Called when END node is seen — closes the current DO-block phase."""
+        # ── Indexed DO loop takes priority ───────────────────────────────────
+        if self._do_loop_active:
+            self._emit_do_loop()
+            return
+
+        # ── IF ... THEN DO / ELSE DO block ───────────────────────────────────
+        if self._do_phase == 1:
+            self._do_phase = 0
+        elif self._do_phase == 2:
+            self._emit_do_block_result()
+            self._do_phase = 0
+
+    def _emit_do_loop(self):
+        """
+        Translate an indexed DO loop into idiomatic R.
+
+        Pattern: DO i = 1 TO n; arr{i} = expr; END;
+        If the body only initialises ARRAY variables to a constant → use across().
+        Otherwise → emit a for loop.
+        """
+        var   = self._do_loop_var
+        frm   = self._do_loop_from
+        to    = self._do_loop_to
+        by    = self._do_loop_by
+        body  = list(self._do_loop_body)
+        ds    = self.current_dataset
+
+        self._do_loop_active = False
+        self._do_loop_body   = []
+
+        # ── Case 1: body is a set of ARRAY element assignments arr{i} = const ──
+        # e.g. flag{i} = 0  →  mutate(across(c(v1,v2,v3), ~0))
+        # Only applies when RHS is a constant (no array element references on RHS)
+        _m0 = (
+            re.match(r'^(\w+)\{' + re.escape(var) + r'\}\s*=\s*(.+)$', body[0], re.I)
+            if len(body) == 1 else None
+        )
+        simple_array_assign = (
+            len(body) == 1
+            and ds
+            and _m0 is not None
+            and '{' not in _m0.group(2)  # RHS must not reference array elements
+        )
+        if simple_array_assign:
+            m = _m0
+            arr_name = m.group(1)   # type: ignore[union-attr]
+            rhs      = self._sas2r(m.group(2).strip())  # type: ignore[union-attr]
+            arr_vars = self._arrays.get(arr_name, [])
+            if arr_vars:
+                cols_str = ', '.join(arr_vars)
+                op = [
+                    f"{ds} <- {ds} %>%",
+                    f"  mutate(across(c({cols_str}), ~{rhs}))",
+                ]
+                if self.current_proc == 'data':
+                    self.pending_data_ops.extend(op)
+                else:
+                    self.lines.extend(op)
+                return
+
+        # ── Case 2: general for loop ──────────────────────────────────────────
+        seq = f"seq({frm}, {to})" if by == '1' else f"seq({frm}, {to}, by = {by})"
+        loop_lines = [f"for ({var} in {seq}) {{"]
+        for stmt_line in body:
+            # Translate arr{i} references inside the body
+            def _sub_arr(m):
+                aname = m.group(1)
+                avars = self._arrays.get(aname)
+                if avars:
+                    return f"{aname}_vars[[{var}]]"  # runtime list indexing
+                return m.group(0)
+            translated = re.sub(r'(\w+)\{' + re.escape(var) + r'\}', _sub_arr, stmt_line)
+            loop_lines.append(f"  {translated}")
+        loop_lines.append("}")
+
+        if ds and self.current_proc == 'data':
+            # Wrap array definitions as named lists when needed
+            for arr_name, arr_vars in self._arrays.items():
+                if arr_vars:
+                    self.pending_data_ops.append(
+                        f'{arr_name}_vars <- list({", ".join(arr_vars)})'
+                    )
+            self.pending_data_ops.extend(loop_lines)
+        else:
+            for arr_name, arr_vars in self._arrays.items():
+                if arr_vars:
+                    self.lines.append(f'{arr_name}_vars <- list({", ".join(arr_vars)})')
+            self.lines.extend(loop_lines)
+
+    def _emit_do_block_result(self):
+        """Emit a single mutate() that applies the IF/ELSE DO assignments."""
+        if not self._if_do_body and not self._else_do_body:
+            return
+        ds = self.current_dataset
+        cond = self._do_condition
+        if not ds:
+            return
+
+        # Collect all variable names from both branches
+        if_vars = {v: e for v, e in self._if_do_body}
+        else_vars = {v: e for v, e in self._else_do_body}
+        all_vars = list(if_vars.keys())
+        for v in else_vars:
+            if v not in if_vars:
+                all_vars.append(v)
+
+        mutate_parts = []
+        for var in all_vars:
+            if_val   = if_vars.get(var, 'NA')
+            else_val = else_vars.get(var, 'NA')
+            mutate_parts.append(f"    {var} = if_else({cond}, {if_val}, {else_val})")
+
+        op_lines = [
+            f"{ds} <- {ds} %>%",
+            "  mutate(",
+        ] + [p + ',' for p in mutate_parts[:-1]] + [mutate_parts[-1]] + ["  )"]
+
+        if self.current_proc == 'data':
+            self.pending_data_ops.extend(op_lines)
+        else:
+            self.lines.extend(op_lines)
+
+        # Reset DO-block state and clear the if-chain so _flush_if_chain is a no-op
+        self._if_do_body = []
+        self._else_do_body = []
+        self._do_condition = ''
+        self.pending_if_chain = []
+
+    def _emit_libname(self, node: Dict[str, Any]):
+        libref = node.get('libref', 'lib')
+        path   = node.get('path', '')
+        self._libname_map[libref] = path
+        self.lines.append(f'# LIBNAME {libref.upper()} = "{path}"')
+        self.lines.append(f'{libref}_path <- "{path}"')
+
+    def _emit_merge_at_run(self):
+        """Translate a SAS MERGE statement into dplyr joins, respecting in= and keep=."""
+        node = self._pending_merge
+        if not node:
+            return
+        self._pending_merge = None
+        datasets = node.get('datasets', [])
+        if len(datasets) < 2:
+            return
+
+        ds = self.current_dataset
+        by_vars = ', '.join(f'"{v}"' for v in (self.by_vars or ['id']))
+        by_call = ', '.join(self.by_vars or ['id'])
+
+        # Load any datasets that have a known libname path (skip if already in memory)
+        for d in datasets:
+            lib = d.get('libref', 'work')
+            name = d.get('name', 'ds')
+            if name in self._created_datasets:
+                continue
+            path = self._libname_map.get(lib)
+            if path and lib != 'work':
+                self.lines.append(
+                    f'{name} <- haven::read_sas(file.path("{path}", "{name}.sas7bdat"))'
+                )
+
+        # Determine join type
+        left_ds    = datasets[0]['name']
+        right_ds   = datasets[1]['name']
+        keep_left  = datasets[0].get('keep', [])
+        keep_right = datasets[1].get('keep', [])
+
+        # Build dataset references, inlining keep= as select() inside the join call
+        def _ds_ref(name: str, keep: list) -> str:
+            if keep:
+                cols = ', '.join(keep)
+                return f"{name} %>% select({cols})"
+            return name
+
+        left_ref  = _ds_ref(left_ds,  keep_left)
+        right_ref = _ds_ref(right_ds, keep_right)
+
+        join_type = node.get('join_type', 'left_join')
+        join_lines = [f"# MERGE {left_ds} + {right_ds} BY {by_call} -> {join_type}"]
+        join_lines.append(f"{ds} <- {left_ref} %>%")
+        join_lines.append(f"  {join_type}({right_ref}, by = c({by_vars}))")
+
+        if self.current_proc == 'data':
+            # Prepend so the join runs BEFORE the subsequent assignment mutations
+            self.pending_data_ops = join_lines + self.pending_data_ops
+        else:
+            self.lines.extend(join_lines)
+        self.data_has_set = True
 
     def _flush_if_chain(self):
         if not self.pending_if_chain or not self.current_dataset:
             self.pending_if_chain = []
             return
+        self._flush_mutations()  # batch any buffered assignments before the case_when
 
         first_assign = None
         cases = []
@@ -447,22 +1036,23 @@ class RCodeGenerator:
             else:
                 self.lines.extend(op_lines)
         else:
-            self.lines.append("# TODO: Could not fully translate IF/ELSE IF/ELSE chain.")
+            self.lines.append("# NOTE: Complex conditional - review and translate manually")
 
         self.pending_if_chain = []
 
     def _emit_where(self, node: Dict[str, Any]):
         cond = self._sas2r(node.get('condition', ''))
         if self.current_proc == 'data' and self.current_dataset:
+            self._flush_mutations()
             self.pending_data_ops.append(f"{self.current_dataset} <- {self.current_dataset} %>%")
             self.pending_data_ops.append(f"  filter({cond})")
         else:
-            # Store for use in the proc emitter; avoids permanently mutating the dataset
             self.where_condition = cond
 
     def _emit_keep(self, node: Dict[str, Any]):
         vs = node.get('variables', [])
         if self.current_dataset and vs:
+            self._flush_mutations()
             op_lines = [
                 f"{self.current_dataset} <- {self.current_dataset} %>%",
                 f"  select({', '.join(vs)})",
@@ -475,6 +1065,7 @@ class RCodeGenerator:
     def _emit_drop(self, node: Dict[str, Any]):
         vs = node.get('variables', [])
         if self.current_dataset and vs:
+            self._flush_mutations()
             drop = ', '.join(f'-{v}' for v in vs)
             op_lines = [
                 f"{self.current_dataset} <- {self.current_dataset} %>%",
@@ -510,7 +1101,105 @@ class RCodeGenerator:
             else:
                 self.lines.append(put_line)
         else:
-            self.lines.append(f"# TODO: Review PUT statement translation: put {content};")
+            self.lines.append(f"# NOTE: SAS PUT statement (review manually): put {content};")
+
+    def _emit_proc_sql(self):
+        """Translate collected PROC SQL statements to dplyr chains."""
+        if not self._sql_statements:
+            self.lines.append("# PROC SQL – no translatable statements found")
+            return
+        for raw_sql in self._sql_statements:
+            self._translate_sql_to_dplyr(raw_sql)
+
+    def _translate_sql_to_dplyr(self, sql: str) -> None:
+        """Convert a single SQL SELECT/CREATE TABLE statement to a dplyr chain."""
+        sql_clean = re.sub(r'\s+', ' ', sql).strip().rstrip(';')
+
+        # CREATE TABLE output AS SELECT ...
+        create_match = re.match(
+            r'create\s+table\s+(\w+)\s+as\s+(.+)', sql_clean, re.I
+        )
+        output_var = None
+        select_part = sql_clean
+        if create_match:
+            output_var = create_match.group(1)
+            select_part = create_match.group(2).strip()
+
+        # Parse SELECT ... FROM ... WHERE ... GROUP BY ... ORDER BY ...
+        sel_m = re.match(
+            r'select\s+(.+?)\s+from\s+(\w+)'
+            r'(?:\s+where\s+(.+?))?'
+            r'(?:\s+group\s+by\s+(.+?))?'
+            r'(?:\s+order\s+by\s+(.+?))?$',
+            select_part, re.I
+        )
+        if not sel_m:
+            self.lines.append(f"# PROC SQL (translate manually): {sql_clean}")
+            return
+
+        cols_raw   = sel_m.group(1).strip()
+        table      = sel_m.group(2).strip()
+        where_raw  = (sel_m.group(3) or '').strip()
+        groupby    = (sel_m.group(4) or '').strip()
+        orderby    = (sel_m.group(5) or '').strip()
+
+        # Translate SQL aggregate functions to dplyr equivalents
+        def _agg(c: str) -> str:
+            c = re.sub(r'\bCOUNT\s*\(\s*\*\s*\)', 'n()', c, flags=re.I)
+            c = re.sub(r'\bCOUNT\s*\((\w+)\)', r'sum(!is.na(\1))', c, flags=re.I)
+            c = re.sub(r'\bSUM\s*\((\w+)\)', r'sum(\1, na.rm=TRUE)', c, flags=re.I)
+            c = re.sub(r'\bAVG\s*\((\w+)\)', r'mean(\1, na.rm=TRUE)', c, flags=re.I)
+            c = re.sub(r'\bMIN\s*\((\w+)\)', r'min(\1, na.rm=TRUE)', c, flags=re.I)
+            c = re.sub(r'\bMAX\s*\((\w+)\)', r'max(\1, na.rm=TRUE)', c, flags=re.I)
+            # col AS alias → alias = col
+            c = re.sub(r'(\w+)\s+AS\s+(\w+)', r'\2 = \1', c, flags=re.I)
+            return c
+
+        def _sql_cond(cond: str) -> str:
+            cond = re.sub(r'\bAND\b', '&', cond, flags=re.I)
+            cond = re.sub(r'\bOR\b',  '|', cond, flags=re.I)
+            cond = re.sub(r'\bNOT\b', '!', cond, flags=re.I)
+            cond = re.sub(r'(?<![!<>=])=(?!=)', '==', cond)
+            return cond
+
+        lhs = output_var or f"sql_result"
+        chain = [f"# PROC SQL: {sql_clean[:80] + ('...' if len(sql_clean) > 80 else '')}",
+                 f"{lhs} <- {table}"]
+
+        if where_raw:
+            chain.append(f"  filter({_sql_cond(where_raw)})")
+        if groupby:
+            grp_cols = ', '.join(c.strip() for c in groupby.split(','))
+            chain.append(f"  group_by({grp_cols})")
+        if cols_raw != '*':
+            # Check if any aggregates present → use summarise, else select
+            if re.search(r'\b(COUNT|SUM|AVG|MIN|MAX)\s*\(', cols_raw, re.I):
+                col_exprs = ', '.join(_agg(c.strip()) for c in cols_raw.split(','))
+                chain.append(f"  summarise({col_exprs}, .groups = 'drop')")
+            else:
+                col_exprs = ', '.join(_agg(c.strip()) for c in cols_raw.split(','))
+                chain.append(f"  select({col_exprs})")
+        if groupby and cols_raw != '*':
+            chain.append("  ungroup()")
+        if orderby:
+            desc_cols = []
+            for c in orderby.split(','):
+                c = c.strip()
+                if re.search(r'\bDESC\b', c, re.I):
+                    c = f"desc({re.sub(r'\s+DESC', '', c, flags=re.I).strip()})"
+                desc_cols.append(c)
+            chain.append(f"  arrange({', '.join(desc_cols)})")
+
+        # Build the pipe chain
+        pipe_lines = [chain[0]]  # comment
+        if len(chain) > 2:
+            pipe_lines.append(chain[1] + " %>%")
+            for step in chain[2:-1]:
+                pipe_lines.append(step + " %>%")
+            pipe_lines.append(chain[-1])
+        else:
+            pipe_lines.append(chain[1])
+        self.lines.extend(pipe_lines)
 
     def _emit_proc_means(self):
         ds = self.proc_opts.get('data', self.current_dataset) or 'data'
@@ -525,9 +1214,9 @@ class RCodeGenerator:
             'sum':    ('Sum',     'sum({v}, na.rm = TRUE)'),
             'nmiss':  ('NMiss',   'sum(is.na({v}))'),
         }
-        # Default order matches SAS PROC MEANS default: N Mean StdDev Min Max
+        # Default order matches SAS PROC MEANS default: N Mean Median StdDev Min Max Sum
         use_stats = [s for s in self.stat_opts if s in stat_map] or \
-                    ['n', 'mean', 'std', 'min', 'max']
+                    ['n', 'mean', 'median', 'std', 'min', 'max', 'sum']
         vars_ = self.analyze_vars
 
         self.lines.append(f"# PROC MEANS: Summary statistics for {ds}")
@@ -568,7 +1257,7 @@ class RCodeGenerator:
 
         if self.class_vars:
             self.lines.append("summary_stats <- ungroup(summary_stats)")
-        self.lines.append("print(as.data.frame(summary_stats), row.names = FALSE)")
+        self.lines.append("print(summary_stats)")
 
     def _emit_proc_freq(self):
         ds = self.proc_opts.get('data', self.current_dataset) or 'data'
@@ -585,7 +1274,7 @@ class RCodeGenerator:
                     "  mutate(Percent = round(n / sum(n) * 100, 2))",
                 ]
                 self.lines.append(f"cat(sprintf('\\nFrequency Table for {var}\\n'))")
-                self.lines.append(f"print(as.data.frame(freq_{safe}), row.names = FALSE)")
+                self.lines.append(f"print(freq_{safe})")
             else:
                 self.lines += [
                     f"freq_{safe} <- {ds} %>%",
@@ -593,11 +1282,11 @@ class RCodeGenerator:
                     "  mutate(",
                     "    Percent = round(n / sum(n) * 100, 2),",
                     "    CumFreq = cumsum(n),",
-                    "    CumPercent = cumsum(Percent)",
+                    "    CumPercent = round(cumsum(n) / sum(n) * 100, 2)",
                     "  )",
                 ]
                 self.lines.append(f"cat(sprintf('\\nFrequency Table for {var}\\n'))")
-                self.lines.append(f"print(as.data.frame(freq_{safe}), row.names = FALSE)")
+                self.lines.append(f"print(freq_{safe})")
                 # Print Total row to match SAS PROC FREQ output
                 self.lines.append(
                     f"cat(sprintf('%-20s %12d %10s\\n', 'Total', sum(freq_{safe}$n), '100.00'))"
@@ -615,11 +1304,6 @@ class RCodeGenerator:
             ]
             self.lines.append(f"{out} <- {ds} %>%")
             self.lines.append(f"  arrange({', '.join(exprs)})")
-            self.lines.append(
-                f"cat(sprintf('NOTE: There were %d observations read from {ds.upper()}.\\n', nrow({ds})))")
-            self.lines.append(
-                f"cat(sprintf('NOTE: Dataset {out.upper()} has %d observations and %d variables.\\n', nrow({out}), ncol({out})))")
-            self.lines.append(f"print(as.data.frame({out}), row.names = FALSE)")
         else:
             self.lines.append("# NOTE: No BY variables specified for PROC SORT")
 
@@ -636,20 +1320,38 @@ class RCodeGenerator:
             ds_ref = ds
         if self.analyze_vars:
             cols = ', '.join(f'"{v}"' for v in self.analyze_vars)
-            self.lines.append(f"print(as.data.frame({ds_ref}[, c({cols}), drop = FALSE]), row.names = FALSE)")
+            self.lines.append(f"print({ds_ref}[, c({cols}), drop = FALSE])")
         else:
-            self.lines.append(f"print(as.data.frame({ds_ref}), row.names = FALSE)")
+            self.lines.append(f"print({ds_ref})")
 
     def _emit_proc_transpose(self):
-        ds = self.proc_opts.get('data', self.current_dataset) or 'data'
-        out = self.proc_opts.get('out', ds + '_t')
-        self.lines += [
-            f"# PROC TRANSPOSE: Pivot {ds}",
-            f"# Convert long↔wide using tidyr::pivot_wider / pivot_longer",
-            f"{out} <- {ds} %>%",
-            f"  pivot_wider(names_from = 1, values_from = 2)  # adjust columns",
-            f"print(as.data.frame({out}), row.names = FALSE)",
-        ]
+        ds   = self.proc_opts.get('data', self.current_dataset) or 'data'
+        out  = self.proc_opts.get('out', ds + '_t')
+        prefix = self.proc_opts.get('prefix', '')
+        id_var  = self.transpose_id_var
+        val_vars = self.analyze_vars  # from VAR statement
+        by_part  = ', '.join(self.by_vars) if self.by_vars else None
+
+        self.lines.append(f"# PROC TRANSPOSE: Pivot {ds}")
+        self.lines.append(f"# Convert long->wide using tidyr::pivot_wider")
+        parts = [f"{out} <- {ds} %>%"]
+        if by_part:
+            parts.append(f"  dplyr::group_by({by_part}) %>%")
+        pivot_args = []
+        if id_var:
+            pivot_args.append(f"names_from = \"{id_var}\"")
+            if prefix:
+                pivot_args.append(f"names_prefix = \"{prefix}\"")
+        else:
+            pivot_args.append("names_from = 1  # adjust: column whose values become headers")
+        if val_vars:
+            vals = ', '.join(f'"{v}"' for v in val_vars)
+            pivot_args.append(f"values_from = c({vals})")
+        else:
+            pivot_args.append("values_from = 2  # adjust: column(s) containing values")
+        parts.append(f"  tidyr::pivot_wider({', '.join(pivot_args)})")
+        self.lines.extend(parts)
+        self.lines.append(f"print(as.data.frame({out}), row.names = FALSE)")
 
     def _emit_proc_glm(self):
         ds = self.proc_opts.get('data', self.current_dataset) or 'data'
@@ -696,43 +1398,348 @@ class RCodeGenerator:
         else:
             self.lines.append(f"write.csv({ds}, '{outfile}', row.names = FALSE)")
 
+    def _emit_proc_logistic(self):
+        ds  = self.proc_opts.get('data', self.current_dataset) or 'data'
+        dep = self.current_model.get('dependent', 'outcome')
+        ind = self.current_model.get('independent', '.')
+        cls = ', '.join(self.class_vars) if self.class_vars else ''
+        if self.current_title:
+            self.lines.append(f"cat('\\n{self.current_title}\\n')")
+        self.lines.append(f"# PROC LOGISTIC: Logistic regression on {ds}")
+        if cls:
+            self.lines.append(f"{ds} <- {ds} %>% mutate(across(c({cls}), as.factor))")
+        # Strip SAS options after '/' and join terms with '+'
+        ind_clean = ind.split('/')[0].strip() if '/' in ind else ind.strip()
+        ind_terms = [t.strip() for t in ind_clean.replace('*', ':').split() if t.strip()]
+        ind_formula = ' + '.join(ind_terms) if ind_terms else '.'
+        self.lines.append(f"logistic_model <- glm({dep} ~ {ind_formula}, data = {ds}, family = binomial(link = 'logit'))")
+        self.lines.append("print(summary(logistic_model))")
+        self.lines.append("print(exp(cbind(OR = coef(logistic_model), confint(logistic_model))))  # odds ratios + CI")
+        if self.lsmeans_effects:
+            self.lines.append("# LSMEANS: use emmeans::emmeans(logistic_model, ...)")
+
+    def _emit_proc_mixed(self):
+        ds  = self.proc_opts.get('data', self.current_dataset) or 'data'
+        dep = self.current_model.get('dependent', 'response')
+        ind = self.current_model.get('independent', '1')
+        cls = ', '.join(self.class_vars) if self.class_vars else None
+        rnd = ' + '.join(f'(1 | {v})' for v in self.random_vars) if self.random_vars else '(1 | subject)'
+        if self.current_title:
+            self.lines.append(f"cat('\\n{self.current_title}\\n')")
+        self.lines.append(f"# PROC MIXED: Mixed effects model on {ds}")
+        if cls:
+            self.lines.append(f"{ds} <- {ds} %>% mutate(across(c({cls}), as.factor))")
+        # Strip SAS options after '/' and join fixed-effect terms with '+'
+        ind_clean = ind.split('/')[0].strip() if '/' in ind else ind.strip()
+        ind_terms = [t.strip() for t in ind_clean.replace('*', ':').split() if t.strip()]
+        fixed = ' + '.join(ind_terms) if ind_terms else '1'
+        formula = f"{dep} ~ {fixed} + {rnd}"
+        self.lines.append("# lme4::lmer is preferred; use nlme::lme for SAS-compatible covariance structures")
+        self.lines.append(f"mixed_model <- lme4::lmer({formula}, data = {ds}, REML = TRUE)")
+        self.lines.append("print(summary(mixed_model))")
+        if self.lsmeans_effects:
+            effects = ', '.join(f'~ {e}' for e in self.lsmeans_effects[:2])
+            self.lines.append(f"# LSMEANS equivalent:")
+            self.lines.append(f"emmeans::emmeans(mixed_model, {effects})")
+
+    def _emit_proc_phreg(self):
+        ds   = self.proc_opts.get('data', self.current_dataset) or 'data'
+        time_decl = self.time_stmt or self.current_model.get('dependent', 'time*event(0)')
+        ind  = self.current_model.get('independent', '.')
+        strt = ', '.join(self.strata_vars) if self.strata_vars else None
+        if self.current_title:
+            self.lines.append(f"cat('\\n{self.current_title}\\n')")
+        self.lines.append(f"# PROC PHREG: Cox proportional hazards on {ds}")
+        # Parse "time*event(0)" style declaration
+        surv_expr = "Surv(time, event)"
+        if '*' in time_decl:
+            parts = time_decl.split('*')
+            t_var = parts[0].strip()
+            e_part = parts[1].strip()
+            m_ev = re.search(r'(\w+)\s*\((\d+)\)', e_part)
+            if m_ev:
+                e_var, censor_val = m_ev.group(1), m_ev.group(2)
+                surv_expr = f"Surv({t_var}, {e_var} != {censor_val})"
+            else:
+                surv_expr = f"Surv({t_var}, {e_part})"
+        formula = f"{surv_expr} ~ {ind.strip() or '1'}"
+        if strt:
+            formula += f" + strata({strt})"
+        self.lines.append(f"cox_model <- survival::coxph({formula}, data = {ds})")
+        self.lines.append("print(summary(cox_model))")
+        self.lines.append("print(survival::cox.zph(cox_model))  # proportional hazards test")
+
+    def _emit_proc_lifetest(self):
+        ds   = self.proc_opts.get('data', self.current_dataset) or 'data'
+        time_decl = self.time_stmt or 'TIME*STATUS(0)'
+        strt = ', '.join(self.strata_vars) if self.strata_vars else None
+        if self.current_title:
+            self.lines.append(f"cat('\\n{self.current_title}\\n')")
+        self.lines.append(f"# PROC LIFETEST: Kaplan-Meier survival on {ds}")
+        # Parse time declaration
+        surv_expr = "Surv(TIME, STATUS)"
+        if '*' in time_decl:
+            parts = time_decl.split('*')
+            t_var = parts[0].strip()
+            e_part = parts[1].strip()
+            m_ev = re.search(r'(\w+)\s*\((\d+)\)', e_part)
+            if m_ev:
+                e_var, censor_val = m_ev.group(1), m_ev.group(2)
+                surv_expr = f"Surv({t_var}, {e_var} != {censor_val})"
+        strata_formula = f"~ {strt}" if strt else "~ 1"
+        self.lines.append(f"km_fit <- survival::survfit({surv_expr} {strata_formula}, data = {ds})")
+        self.lines.append("print(summary(km_fit))")
+        self.lines.append("plot(km_fit, xlab = 'Time', ylab = 'Survival Probability')")
+        if strt:
+            self.lines.append(f"# Log-rank test:")
+            self.lines.append(f"survival::survdiff({surv_expr} {strata_formula}, data = {ds})")
+
+    def _emit_proc_report(self):
+        ds   = self.proc_opts.get('data', self.current_dataset) or 'data'
+        cols = self.column_vars or self.analyze_vars
+        if self.current_title:
+            self.lines.append(f"cat('\\n{self.current_title}\\n')")
+        self.lines.append(f"# PROC REPORT: Publication table for {ds}")
+        self.lines.append("# gt package generates HTML/PDF/Word tables (closest SAS PROC REPORT equivalent)")
+        if cols:
+            select_cols = ', '.join(cols)
+            self.lines.append(f"report_tbl <- {ds} %>%")
+            self.lines.append(f"  select({select_cols}) %>%")
+            if self.where_condition:
+                self.lines.append(f"  filter({self.where_condition}) %>%")
+        else:
+            self.lines.append(f"report_tbl <- {ds} %>%")
+        self.lines.append("  gt::gt()")
+        self.lines.append("print(report_tbl)")
+
+    def _emit_proc_tabulate(self):
+        ds  = self.proc_opts.get('data', self.current_dataset) or 'data'
+        cls = ', '.join(self.class_vars) if self.class_vars else None
+        avs = ', '.join(self.analyze_vars) if self.analyze_vars else None
+        if self.current_title:
+            self.lines.append(f"cat('\\n{self.current_title}\\n')")
+        self.lines.append(f"# PROC TABULATE: Summary table for {ds}")
+        self.lines.append("# gtsummary::tbl_summary is the closest R equivalent")
+        if cls:
+            self.lines.append(f"tab_tbl <- {ds} %>%")
+            if avs:
+                self.lines.append(f"  select({cls}, {avs}) %>%")
+            self.lines.append(f"  gtsummary::tbl_summary(by = {self.class_vars[0]})")
+        else:
+            self.lines.append(f"tab_tbl <- {ds} %>% gtsummary::tbl_summary()")
+        self.lines.append("print(tab_tbl)")
+
+    def _emit_proc_compare(self):
+        base_ds    = self.proc_opts.get('data', self.current_dataset) or 'base_data'
+        compare_ds = self.proc_opts.get('compare', 'compare_data')
+        self.lines.append(f"# PROC COMPARE: Dataset comparison {base_ds} vs {compare_ds}")
+        self.lines.append(f"compare_result <- all.equal({base_ds}, {compare_ds})")
+        self.lines.append("if (isTRUE(compare_result)) {")
+        self.lines.append("  cat('Datasets are identical.\\n')")
+        self.lines.append("} else {")
+        self.lines.append("  cat('Differences found:\\n'); print(compare_result)")
+        self.lines.append("}")
+        self.lines.append("# For detailed comparison use: arsenal::comparedf() or diffdf::diffdf()")
+
+    def _emit_proc_contents(self):
+        ds = self.proc_opts.get('data', self.current_dataset) or 'data'
+        self.lines.append(f"# PROC CONTENTS: Dataset metadata for {ds}")
+        self.lines.append(f"cat('Dataset:', '{ds}', '\\n')")
+        self.lines.append(f"cat('Rows:', nrow({ds}), ' Columns:', ncol({ds}), '\\n')")
+        self.lines.append(f"dplyr::glimpse({ds})")
+        self.lines.append(f"str({ds})")
+
+    def _emit_proc_univariate(self):
+        ds  = self.proc_opts.get('data', self.current_dataset) or 'data'
+        avs = self.analyze_vars
+        if self.current_title:
+            self.lines.append(f"cat('\\n{self.current_title}\\n')")
+        self.lines.append(f"# PROC UNIVARIATE: Distribution analysis for {ds}")
+        if avs:
+            for v in avs:
+                self.lines.append(f"cat('\\n--- {v} ---\\n')")
+                self.lines.append(f"print(summary({ds}${v}))")
+                self.lines.append(f"cat('Skewness:', moments::skewness({ds}${v}, na.rm=TRUE), '\\n')")
+                self.lines.append(f"cat('Kurtosis:', moments::kurtosis({ds}${v}, na.rm=TRUE), '\\n')")
+                self.lines.append(f"shapiro_test <- shapiro.test({ds}${v}[!is.na({ds}${v})][1:min(5000, sum(!is.na({ds}${v})))])")
+                self.lines.append(f"cat('Shapiro-Wilk p-value:', shapiro_test$p.value, '\\n')")
+        else:
+            self.lines.append(f"print(summary({ds}))")
+
+    def _emit_proc_corr(self):
+        ds  = self.proc_opts.get('data', self.current_dataset) or 'data'
+        avs = self.analyze_vars
+        if self.current_title:
+            self.lines.append(f"cat('\\n{self.current_title}\\n')")
+        self.lines.append(f"# PROC CORR: Correlation analysis for {ds}")
+        if avs:
+            cols = ', '.join(f'"{v}"' for v in avs)
+            self.lines.append(f"corr_data <- {ds}[, c({cols})]")
+        else:
+            self.lines.append(f"corr_data <- {ds} %>% dplyr::select(where(is.numeric))")
+        self.lines.append("corr_matrix <- cor(corr_data, use = 'pairwise.complete.obs')")
+        self.lines.append("print(round(corr_matrix, 4))")
+        self.lines.append("# For p-values: Hmisc::rcorr(as.matrix(corr_data))")
+
+    def _emit_proc_import(self):
+        opts    = self.proc_opts
+        out_ds  = opts.get('data', 'imported_data')
+        datafile = opts.get('datafile', 'input_file')
+        dbms    = opts.get('dbms', 'csv')
+        self.lines.append(f"# PROC IMPORT: Read {datafile}")
+        if dbms in ('csv', 'dlm', 'tab'):
+            sep = '\\t' if dbms == 'tab' else ','
+            self.lines.append(f'{out_ds} <- readr::read_delim("{datafile}", delim="{sep}", show_col_types=FALSE)')
+        elif dbms == 'xlsx':
+            self.lines.append(f'{out_ds} <- readxl::read_excel("{datafile}")')
+        elif dbms in ('sas7bdat', 'sas'):
+            self.lines.append(f'{out_ds} <- haven::read_sas("{datafile}")')
+        elif dbms == 'xpt':
+            self.lines.append(f'{out_ds} <- haven::read_xpt("{datafile}")')
+        else:
+            self.lines.append(f'{out_ds} <- readr::read_csv("{datafile}")  # adjust reader for {dbms}')
+
     # ── SAS expression → R expression ────────────────────────────────────
+
+    # Date-related format keywords used in SAS input()/put()
+    _DATE_FMTS = {'yymmdd', 'date', 'mmddyy', 'ddmmyy', 'is8601', 'julian',
+                  'yymmddn', 'dateampm', 'datetime', 'anydtdte'}
 
     def _sas2r(self, expr: str) -> str:
         if not expr:
             return ''
         r = expr
-        # logical operators
+
+        # ── SAS automatic variables ───────────────────────────────────────────
+        r = re.sub(r'\b_N_\b', 'row_number()', r)
+        r = re.sub(r'\b_NOBS_\b', 'n()', r)
+
+        # ── Logical operators ─────────────────────────────────────────────────
         r = re.sub(r'\bAND\b', '&', r, flags=re.I)
         r = re.sub(r'\bOR\b', '|', r, flags=re.I)
         r = re.sub(r'\bNOT\b', '!', r, flags=re.I)
-        # comparison operators (word forms)
+
+        # ── Comparison operators (word forms) ─────────────────────────────────
         r = re.sub(r'\bEQ\b', '==', r, flags=re.I)
         r = re.sub(r'\bNE\b', '!=', r, flags=re.I)
         r = re.sub(r'\bLT\b', '<', r, flags=re.I)
         r = re.sub(r'\bLE\b', '<=', r, flags=re.I)
         r = re.sub(r'\bGT\b', '>', r, flags=re.I)
         r = re.sub(r'\bGE\b', '>=', r, flags=re.I)
-        # SAS uses = for equality in conditions; R uses ==
-        # Only replace bare = that is not already part of <=, >=, !=, ==
+        # Bare = in conditions → ==
         r = re.sub(r'(?<![!<>=])=(?!=)', '==', r)
-        # power
+
+        # ── Power ─────────────────────────────────────────────────────────────
         r = r.replace('**', '^')
-        # SAS functions → R
-        r = re.sub(r'\bint\s*\(', 'as.integer(', r, flags=re.I)
-        r = re.sub(r'\bupcase\s*\(', 'toupper(', r, flags=re.I)
-        r = re.sub(r'\blowcase\s*\(', 'tolower(', r, flags=re.I)
-        r = re.sub(r'\btrim\s*\(', 'trimws(', r, flags=re.I)
-        r = re.sub(r'\bcats\s*\(', 'paste0(', r, flags=re.I)
-        r = re.sub(r'\bsubstr\s*\(', 'substr(', r, flags=re.I)
-        r = re.sub(r'\binput\s*\(([^,]+),\s*\S+\)', r'as.numeric(\1)', r, flags=re.I)
-        r = re.sub(r'\bput\s*\(([^,]+),\s*\S+\)', r'as.character(\1)', r, flags=re.I)
-        r = re.sub(r'\babs\s*\(', 'abs(', r, flags=re.I)
-        r = re.sub(r'\bsqrt\s*\(', 'sqrt(', r, flags=re.I)
-        r = re.sub(r'\bexp\s*\(', 'exp(', r, flags=re.I)
-        r = re.sub(r'\blog\s*\(', 'log(', r, flags=re.I)
-        r = re.sub(r'\bround\s*\(', 'round(', r, flags=re.I)
+
+        # ── String functions ──────────────────────────────────────────────────
+        r = re.sub(r'\bupcase\s*\(',   'toupper(', r, flags=re.I)
+        r = re.sub(r'\blowcase\s*\(',  'tolower(', r, flags=re.I)
+        r = re.sub(r'\btrim\s*\(',     'trimws(', r, flags=re.I)
+        r = re.sub(r'\bstrip\s*\(',    'trimws(', r, flags=re.I)
+        r = re.sub(r'\bpropcase\s*\(', 'str_to_title(', r, flags=re.I)
+        r = re.sub(r'\bcats\s*\(',     'paste0(', r, flags=re.I)
+        r = re.sub(r'\bcatt\s*\(',     'paste0(', r, flags=re.I)
+        r = re.sub(r'\bsubstr\s*\(',   'substr(', r, flags=re.I)
+        r = re.sub(r'\bindex\s*\(',    'regexpr(', r, flags=re.I)
+        r = re.sub(r'\bcompress\s*\(', 'gsub(" ", "", ', r, flags=re.I)
+        r = re.sub(r'\btranwrd\s*\(',  'gsub(', r, flags=re.I)
+        r = re.sub(r'\bscan\s*\(',     'strsplit(', r, flags=re.I)
+        r = re.sub(r'\bleft\s*\(',     'trimws(', r, flags=re.I)
+
+        # catx(sep, a, b, ...) → paste(a, b, ..., sep=sep)
+        def _translate_catx(m: re.Match) -> str:
+            inner = m.group(1)
+            # Split on first comma to get separator
+            comma_pos = inner.find(',')
+            if comma_pos == -1:
+                return f'paste({inner})'
+            sep = inner[:comma_pos].strip()
+            rest_args = inner[comma_pos + 1:].strip()
+            return f'paste({rest_args}, sep={sep})'
+        r = re.sub(r'\bcatx\s*\(([^)]+)\)', _translate_catx, r, flags=re.I)
+
+        # cat(a, b) → paste0(a, b)
+        r = re.sub(r'\bcat\s*\(',  'paste0(', r, flags=re.I)
+
+        # ── Numeric / math functions ──────────────────────────────────────────
+        r = re.sub(r'\bint\s*\(',    'as.integer(', r, flags=re.I)
+        r = re.sub(r'\bceil\s*\(',   'ceiling(', r, flags=re.I)
+        r = re.sub(r'\bfloor\s*\(',  'floor(', r, flags=re.I)
+        r = re.sub(r'\babs\s*\(',    'abs(', r, flags=re.I)
+        r = re.sub(r'\bsqrt\s*\(',   'sqrt(', r, flags=re.I)
+        r = re.sub(r'\bexp\s*\(',    'exp(', r, flags=re.I)
+        r = re.sub(r'\blog\s*\(',    'log(', r, flags=re.I)
+        r = re.sub(r'\bround\s*\(',  'round(', r, flags=re.I)
         r = re.sub(r'\bmod\s*\(([^,]+),\s*([^)]+)\)', r'(\1 %% \2)', r, flags=re.I)
-        # SAS missing value (standalone dot)
+        r = re.sub(r'\bsum\s*\(',   'sum(', r, flags=re.I)
+        r = re.sub(r'\bmean\s*\(',  'mean(', r, flags=re.I)
+        r = re.sub(r'\bmin\s*\(',   'pmin(', r, flags=re.I)
+        r = re.sub(r'\bmax\s*\(',   'pmax(', r, flags=re.I)
+        r = re.sub(r'\bcoalesce\s*\(', 'dplyr::coalesce(', r, flags=re.I)
+        r = re.sub(r'\bifn\s*\(',   'if_else(', r, flags=re.I)
+        r = re.sub(r'\bifc\s*\(',   'if_else(', r, flags=re.I)
+        r = re.sub(r'\bnmiss\s*\(([^)]+)\)', r'sum(is.na(\1))', r, flags=re.I)
+
+        # ── Date / time functions ─────────────────────────────────────────────
+        r = re.sub(r'\btoday\s*\(\s*\)', 'Sys.Date()', r, flags=re.I)
+        r = re.sub(r'\byear\s*\(',   'lubridate::year(', r, flags=re.I)
+        r = re.sub(r'\bmonth\s*\(',  'lubridate::month(', r, flags=re.I)
+        r = re.sub(r'\bday\s*\(',    'lubridate::day(', r, flags=re.I)
+        r = re.sub(r'\bdatepart\s*\(', 'as.Date(', r, flags=re.I)
+        r = re.sub(r'\bmdy\s*\(',    'lubridate::make_date(', r, flags=re.I)
+        r = re.sub(r'\bymd\s*\(',    'lubridate::ymd(', r, flags=re.I)
+        r = re.sub(r'\bdatdif\s*\(([^,]+),\s*([^,]+),\s*[^)]+\)',
+                   r'as.numeric(difftime(\2, \1, units = "days"))', r, flags=re.I)
+
+        # intck('unit', start, end) → lubridate interval
+        def _translate_intck(m: re.Match) -> str:
+            unit  = m.group(1).strip().strip("'\"").lower()
+            start = m.group(2).strip()
+            end   = m.group(3).strip()
+            unit_map = {'day': 'days(1)', 'month': 'months(1)', 'year': 'years(1)',
+                        'week': 'weeks(1)', 'hour': 'hours(1)'}
+            r_unit = unit_map.get(unit, 'days(1)')
+            return f'as.numeric(lubridate::interval({start}, {end}), "{unit}s")'
+        r = re.sub(r'\bintck\s*\(\s*([^,]+),\s*([^,]+),\s*([^)]+)\)',
+                   _translate_intck, r, flags=re.I)
+
+        # intnx('unit', date, n) → date + lubridate period
+        def _translate_intnx(m: re.Match) -> str:
+            unit  = m.group(1).strip().strip("'\"").lower()
+            dt    = m.group(2).strip()
+            n     = m.group(3).strip()
+            fn_map = {'day': 'days', 'month': 'months', 'year': 'years', 'week': 'weeks'}
+            fn = fn_map.get(unit, 'days')
+            return f'{dt} + lubridate::{fn}({n})'
+        r = re.sub(r'\bintnx\s*\(\s*([^,]+),\s*([^,]+),\s*([^)]+)\)',
+                   _translate_intnx, r, flags=re.I)
+
+        # input(x, format.) — format-aware date vs numeric
+        def _translate_input(m: re.Match) -> str:
+            var = m.group(1).strip()
+            fmt = m.group(2).strip().lower().rstrip('.')
+            if any(kw in fmt for kw in RCodeGenerator._DATE_FMTS):
+                return f'as.Date({var}, "%Y-%m-%d")'
+            return f'as.numeric({var})'
+        r = re.sub(r'\binput\s*\(([^,]+),\s*(\S+)\)', _translate_input, r, flags=re.I)
+
+        # put(x, format.) — format-aware date formatting
+        def _translate_put(m: re.Match) -> str:
+            var = m.group(1).strip()
+            fmt = m.group(2).strip().lower().rstrip('.')
+            if 'is8601' in fmt:
+                return f'format(as.Date({var}, origin = "1960-01-01"), "%Y-%m-%d")'
+            if any(kw in fmt for kw in RCodeGenerator._DATE_FMTS):
+                return f'format(as.Date({var}, origin = "1960-01-01"), "%Y-%m-%d")'
+            return f'as.character({var})'
+        r = re.sub(r'\bput\s*\(([^,]+),\s*(\S+)\)', _translate_put, r, flags=re.I)
+
+        # ── Date arithmetic: DT - DT → as.numeric(DT - DT) ──────────────────
+        r = self._DT_ARITH_RE.sub(
+            lambda m: f"as.numeric({m.group(1)} - {m.group(2)})", r
+        )
+
+        # ── SAS missing value (standalone dot) ────────────────────────────────
         r = re.sub(r'(?<![.\w])\.(?![.\w])', 'NA', r)
-        return r
+        return self._canonicalize_vars(r)

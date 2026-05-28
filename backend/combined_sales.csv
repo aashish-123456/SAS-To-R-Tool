@@ -1,0 +1,7 @@
+"Month","Sales","Region","Bonus","Category"
+"Mar",17000,"North",850,"High"
+"Feb",15000,"North",750,"High"
+"Jan",12000,"North",600,"Medium"
+"Mar",16000,"South",800,"High"
+"Feb",14000,"South",700,"Medium"
+"Jan",10000,"South",500,"Low"

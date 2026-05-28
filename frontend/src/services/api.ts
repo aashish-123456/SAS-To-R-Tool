@@ -10,9 +10,92 @@ const api = axios.create({
   },
 });
 
-export interface Project { id: string; name: string; description?: string; status: string; created_at: string; sas_code?: string; sas_file_id?: string; dataset_files?: string[]; translation_id?: string; execution_id?: string; validation_id?: string; report_id?: string; generated_r_code_id?: string; validation_report_id?: string; }
-export interface TranslationStatus { status: string; progress: number; r_code_preview?: string; warnings: string[]; }
-export interface ValidationResult { overall_match: number; structure_match: boolean; value_discrepancies: number; statistics: any; issues?: Array<{ severity: 'warning' | 'error' | 'info'; title: string; detail: string; }>; }
+export interface Project {
+  id: string;
+  name: string;
+  description?: string;
+  status: string;
+  created_at: string;
+  sas_code?: string;
+  sas_file_id?: string;
+  dataset_files?: string[];
+  translation_id?: string;
+  execution_id?: string;
+  validation_id?: string;
+  report_id?: string;
+  generated_r_code_id?: string;
+  validation_report_id?: string;
+  // enriched fields added after translation / validation
+  r_lines?: number;
+  sas_lines?: number;
+  warnings_count?: number;
+  translated_at?: string;
+  overall_confidence?: number;
+  confidence_label?: string;
+  issues_count?: { critical: number; major: number; minor: number };
+  datasets_validated?: number;
+  procedures_validated?: number;
+}
+export interface TranslationStatus { status: string; progress: number; r_code_preview?: string; warnings: string[]; engine_results?: Record<string, any>; }
+export interface ValidationScenario {
+  id: string;
+  category: 'structural' | 'functional' | 'statistical' | 'execution' | 'semantic';
+  name: string;
+  description: string;
+  sas_result: string;
+  r_result: string;
+  status: 'passed' | 'warning' | 'failed';
+  impact: number;
+  sas_code?: string;
+  r_code?: string;
+  detail?: string;
+}
+export interface ValidationIssue {
+  severity: 'critical' | 'major' | 'minor';
+  title: string;
+  detail: string;
+  suggestion: string;
+  category: string;
+}
+export interface CategoryScore {
+  name: string;
+  display_name: string;
+  score: number;
+  weight: number;
+  scenarios_passed: number;
+  scenarios_total: number;
+}
+export interface ValidationEngine {
+  name: string;
+  description: string;
+  status: 'completed' | 'warning' | 'failed';
+  scenarios_passed: number;
+  scenarios_total: number;
+}
+export interface ValidationResult {
+  // backward-compat
+  overall_match: number;
+  structure_match: boolean;
+  value_discrepancies: number;
+  statistics: any;
+  // rich semantic fields
+  validation_id?: string;
+  overall_confidence?: number;
+  confidence_label?: string;
+  datasets_validated?: number;
+  datasets_matched?: number;
+  datasets_mismatched?: number;
+  procedures_validated?: number;
+  procedures_matched?: number;
+  procedures_mismatched?: number;
+  issues?: ValidationIssue[];
+  category_scores?: CategoryScore[];
+  engines?: ValidationEngine[];
+  scenarios?: ValidationScenario[];
+  recommendations?: string[];
+  sas_output_preview?: string;
+  r_output_preview?: string;
+}
 export interface FeedbackRequest { project_id: string; translation_id: string; is_correct: boolean; corrections?: any; error_type?: string; user_notes?: string; }
 export interface UserProfile { name: string; email: string; profile_photo?: string; }
 
