@@ -49,28 +49,26 @@ const MyProfile: React.FC = () => {
       {/* Avatar card */}
       <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
 
-        {/* Top banner */}
-        <div className="h-24 bg-gradient-to-r from-[#1f4368] to-[#24507e]" />
-
-        {/* Avatar + name */}
-        <div className="px-6 pb-6 -mt-12">
-          <div className="flex items-end gap-4 mb-5">
-            {profile?.profile_photo ? (
-              <img
-                src={profile.profile_photo}
-                alt={name}
-                className="w-20 h-20 rounded-full object-cover border-4 border-white shadow-md"
-              />
-            ) : (
-              <div className="w-20 h-20 rounded-full bg-[#1f4368] border-4 border-white shadow-md flex items-center justify-center flex-shrink-0">
-                <span className="text-white text-2xl font-extrabold">{getInitials(name)}</span>
-              </div>
-            )}
-            <div className="pb-1">
-              <h1 className="text-xl font-extrabold text-slate-900 leading-tight">{name}</h1>
-              <p className="text-sm text-slate-500">Administrator</p>
+        {/* Banner with avatar + name centred inside */}
+        <div className="bg-gradient-to-r from-[#1f4368] to-[#24507e] px-6 py-8 flex flex-col items-center gap-3">
+          {profile?.profile_photo ? (
+            <img
+              src={profile.profile_photo}
+              alt={name}
+              className="w-20 h-20 rounded-full object-cover border-4 border-white/30 shadow-lg"
+            />
+          ) : (
+            <div className="w-20 h-20 rounded-full bg-white/20 border-4 border-white/30 shadow-lg flex items-center justify-center">
+              <span className="text-white text-2xl font-extrabold tracking-wide">{getInitials(name)}</span>
             </div>
+          )}
+          <div className="text-center">
+            <h1 className="text-xl font-extrabold text-white leading-tight">{name}</h1>
+            <p className="text-sm text-blue-200 mt-0.5">Administrator</p>
           </div>
+        </div>
+
+        <div className="px-6 pb-6 pt-5">
 
           {/* Info rows */}
           <div className="space-y-3">
