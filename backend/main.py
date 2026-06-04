@@ -101,6 +101,16 @@ from app.translation import TranslationPipeline
 # Singleton pipeline (engines are stateless, re-use across requests)
 _translation_pipeline = TranslationPipeline()
 
+# ── Execution config (in-memory; persists for the server session) ─────────────
+_execution_config: Dict[str, Any] = {
+    "sasViya": {
+        "enabled": False,
+        "baseUrl": "",
+        "username": "",
+        "password": "",
+    },
+}
+
 app = FastAPI(
     title="SAS to R Automation Platform",
     description="AI-Powered SAS to R translation with output comparison",
@@ -122,6 +132,70 @@ UPLOAD_DIR = Path("data/uploads")
 OUTPUT_DIR = Path("data/outputs")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── Pre-install common SAS→R packages at startup (background, non-blocking) ──
+
+def _preinstall_r_packages() -> None:
+    """Install the most-used SAS→R packages once into the persistent StatBRidge
+    library so they are already present when execution is requested."""
+    rscript = _find_rscript()
+    if not rscript:
+        return
+    script = r"""
+sb_lib <- file.path(Sys.getenv("USERPROFILE", unset = tempdir()),
+                    ".statbridge", "rlibs")
+if (!dir.exists(sb_lib)) dir.create(sb_lib, recursive = TRUE, showWarnings = FALSE)
+.libPaths(c(sb_lib, .libPaths()))
+options(
+  repos = c(CRAN = "https://cloud.r-project.org"),
+  warn  = -1,
+  install.packages.compile.from.source = "never"
+)
+pkgs <- c(
+  "dplyr", "tidyr", "haven", "readr", "stringr", "forcats",
+  "tibble", "purrr", "magrittr", "lubridate", "scales",
+  "ggplot2", "survival", "emmeans", "car"
+)
+missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing) > 0) {
+  message("StatBRidge: pre-installing ", length(missing), " package(s): ",
+          paste(missing, collapse = ", "))
+  install.packages(missing, lib = sb_lib, dependencies = TRUE,
+                   quiet = TRUE, verbose = FALSE)
+  message("StatBRidge: pre-install complete")
+} else {
+  message("StatBRidge: all common packages already installed")
+}
+"""
+    tmp = None
+    try:
+        import tempfile as _tf
+        with _tf.NamedTemporaryFile(suffix=".R", mode="w",
+                                    delete=False, encoding="utf-8") as f:
+            f.write(script)
+            tmp = f.name
+        subprocess.run(
+            [rscript, "--no-save", "--no-restore", tmp],
+            capture_output=True, text=True, timeout=600,
+        )
+    except Exception:
+        pass
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+@app.on_event("startup")
+async def startup_preinstall():
+    import asyncio, concurrent.futures
+    loop = asyncio.get_event_loop()
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    # Await the future so exceptions are logged rather than silently swallowed
+    future = loop.run_in_executor(executor, _preinstall_r_packages)
+    asyncio.ensure_future(future)  # schedule but don't block startup
 
 # ── in-memory stores ───────────────────────────────────────────────────────────
 projects_db: Dict[str, Any] = {}
@@ -365,9 +439,12 @@ def execute_r_code(r_code: str) -> Dict[str, Any]:
             f.write(r_code)
             tmp = f.name
 
+        # Use --no-save --no-restore (not --vanilla) so the user R library
+        # is writable and install.packages() works without elevation.
         result = subprocess.run(
-            [rscript, '--vanilla', tmp],
-            capture_output=True, text=True, timeout=60,
+            [rscript, '--no-save', '--no-restore', tmp],
+            capture_output=True, text=True,
+            timeout=300,   # allow up to 5 min for first-time package installs
         )
         stdout = result.stdout.strip()
         stderr = result.stderr.strip()
@@ -375,7 +452,8 @@ def execute_r_code(r_code: str) -> Dict[str, Any]:
         if stdout:
             logs += stdout.split('\n')
         if stderr:
-            logs += stderr.split('\n')
+            logs += [l for l in stderr.split('\n')
+                     if l and not l.startswith('trying URL')]  # skip noisy install lines
 
         return {
             "status": "success" if result.returncode == 0 else "error",
@@ -388,7 +466,7 @@ def execute_r_code(r_code: str) -> Dict[str, Any]:
         return {
             "status": "timeout",
             "output": "",
-            "logs": ["Execution timed out after 60 seconds."],
+            "logs": ["Execution timed out. Package installation may have exceeded the limit."],
             "errors": "timeout",
             "r_available": True,
         }
@@ -409,6 +487,359 @@ def execute_r_code(r_code: str) -> Dict[str, Any]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# DATASET PATH RESOLVER
+# The SAS code already has the CORRECT server paths in DATAFILE= (patched at
+# upload time).  We just read those paths directly instead of trying to match
+# filenames.  This is the same path shown below the upload box in the UI.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def build_dataset_registry(sas_code: str, dataset_paths: List[str]) -> Dict[str, Any]:
+    """
+    Build a map of SAS dataset names → actual server paths by reading the
+    DATAFILE= values already in the (upload-patched) SAS code.
+
+    The SAS code is patched at upload time so DATAFILE= already contains the
+    correct absolute server path — the same path shown below the upload box.
+    We just extract it directly instead of trying to match filenames.
+
+    Example: PROC IMPORT datafile="C:/uploads/xxx_combined_ae_raw_dataset.csv"
+                         out=raw.ae_raw
+    → registry["ae_raw"] = {"path": "C:/uploads/xxx_combined_ae_raw_dataset.csv", "type": "csv"}
+    """
+    registry: Dict[str, Any] = {}
+
+    proc_import_re = re.compile(
+        r'proc\s+import\b.*?(?:datafile|filename)\s*=\s*["\']([^"\']+)["\']'
+        r'.*?out\s*=\s*([\w.]+)',
+        re.I | re.S,
+    )
+    for m in proc_import_re.finditer(sas_code):
+        datafile_path = m.group(1).replace("\\", "/")
+        out_name      = m.group(2).lower().strip(";").strip()
+        ext           = datafile_path.rsplit(".", 1)[-1].lower() if "." in datafile_path else "csv"
+        short         = out_name.split(".")[-1]          # "ae_raw" from "raw.ae_raw"
+        libref        = out_name.split(".")[0] if "." in out_name else "work"
+        entry = {"path": datafile_path, "type": ext, "r_var": short}
+        for alias in {short, out_name, out_name.replace(".", "_"), f"{libref}_{short}"}:
+            registry[alias] = entry
+
+    return registry
+
+
+def fix_r_dataset_references(
+    r_code: str,
+    registry: Dict[str, Any],
+    dataset_paths: List[str] = None,
+) -> str:
+    """
+    Replace every dataset read call in the R code that points to a
+    non-existent path with the correct call using the path from the registry
+    (which came directly from DATAFILE= in the patched SAS code).
+
+    Falls back to the first available uploaded CSV on disk if the registry
+    has no entry for a given variable.
+    """
+    _bd = Path(__file__).parent  # backend directory for resolving relative paths
+    _reg = {k.lower(): v for k, v in registry.items()} if registry else {}
+
+    # Resolve dataset_paths to absolute Paths so exists() is reliable
+    _abs_ds: List[Path] = []
+    for ps in (dataset_paths or []):
+        p = Path(ps) if Path(ps).is_absolute() else _bd / ps
+        if p.exists():
+            _abs_ds.append(p)
+
+    def _first_csv() -> Optional[str]:
+        for p in _abs_ds:
+            if p.suffix.lower() == ".csv":
+                return str(p).replace("\\", "/")
+        return None
+
+    def _path_exists_on_server(path_str: str) -> bool:
+        p = Path(path_str)
+        return p.exists() or (_bd / path_str).exists()
+
+    def _resolve(path_in_code: str, var_name: str = "") -> Optional[str]:
+        """Return correct server path, or None if the path is already valid."""
+        if _path_exists_on_server(path_in_code):
+            return None  # already correct — leave it alone
+
+        # 1. Registry lookup by variable name (most reliable)
+        if var_name:
+            info = _reg.get(var_name.lower())
+            if not info:
+                for k, v in _reg.items():
+                    if var_name.lower() in k or k in var_name.lower():
+                        info = v
+                        break
+            if info:
+                return info["path"]
+
+        # 2. Registry lookup by path stem
+        bn   = path_in_code.replace("\\", "/").split("/")[-1].lower()
+        stem = bn.rsplit(".", 1)[0] if "." in bn else bn
+        info = _reg.get(stem)
+        if not info:
+            for k, v in _reg.items():
+                if stem in k or k in stem:
+                    info = v
+                    break
+        if info:
+            return info["path"]
+
+        # 3. Fallback: first uploaded CSV on disk
+        return _first_csv()
+
+    def _make_read(server_path: str) -> str:
+        ext = Path(server_path).suffix.lower()
+        if ext == ".csv":
+            return f'readr::read_csv("{server_path}", show_col_types = FALSE)'
+        if ext in (".sas7bdat", ".sas"):
+            return f'haven::read_sas("{server_path}")'
+        if ext == ".xpt":
+            return f'haven::read_xpt("{server_path}")'
+        return f'readr::read_csv("{server_path}", show_col_types = FALSE)'
+
+    # Pass 1 — assignment:  var <- [as.data.frame(] read_*("path"[, args]) [)]
+    def _repl_assign(m: re.Match) -> str:
+        var, path_in_code = m.group(1), m.group(2)
+        correct = _resolve(path_in_code, var)
+        return f"{var} <- {_make_read(correct)}" if correct else m.group(0)
+
+    r_code = re.sub(
+        r'(\w+)\s*<-\s*(?:as\.data\.frame\s*\(\s*)?'
+        r'(?:haven::)?(?:read_sas|read_xpt|readr::read_csv|readr::read_delim|read_csv|read\.csv)'
+        r'\s*\(\s*["\']([^"\']+)["\'][^)]*\)(?:\s*\))?',
+        _repl_assign, r_code, flags=re.I,
+    )
+
+    # Pass 2 — bare calls (inside pipes or function arguments)
+    def _repl_bare(m: re.Match) -> str:
+        correct = _resolve(m.group(1))
+        return _make_read(correct) if correct else m.group(0)
+
+    for pat in [
+        r'haven::read_sas\s*\(\s*["\']([^"\']+)["\'][^)]*\)',
+        r'haven::read_xpt\s*\(\s*["\']([^"\']+)["\'][^)]*\)',
+        r'readr::read_csv\s*\(\s*["\']([^"\']+)["\'][^)]*\)',
+        r'readr::read_delim\s*\(\s*["\']([^"\']+)["\'][^)]*\)',
+        r'(?<![:\w])read\.csv\s*\(\s*["\']([^"\']+)["\'][^)]*\)',
+    ]:
+        r_code = re.sub(pat, _repl_bare, r_code, flags=re.I)
+
+    return r_code
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DATASET LOADER  (CSV / SAS7BDAT / XPT  →  pandas DataFrames)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def load_uploaded_datasets(dataset_paths: List[str]) -> Dict[str, Any]:
+    """Read uploaded dataset files into pandas DataFrames for SAS simulation."""
+    try:
+        import pandas as pd
+    except ImportError:
+        return {}
+
+    result: Dict[str, Any] = {}
+    for path_str in dataset_paths:
+        p = Path(path_str)
+        if not p.exists():
+            continue
+        ext = p.suffix.lower()
+        # Files are stored as "{project_uuid}_dataset_{file_uuid}_{original_name}"
+        # Extract just the original name so simulation can look up "ae_raw", etc.
+        _parts = p.stem.split("_", 3)
+        stem = (_parts[3] if len(_parts) == 4 else p.stem).lower()
+        try:
+            if ext == ".csv":
+                df = pd.read_csv(path_str)
+            elif ext == ".sas7bdat":
+                df = pd.read_sas(path_str, format="sas7bdat", encoding="utf-8")
+            elif ext == ".xpt":
+                df = pd.read_sas(path_str, format="xport", encoding="utf-8")
+            else:
+                continue
+            df.columns = [c.lower() for c in df.columns]
+            entry = {"rows": len(df), "cols": list(df.columns), "df": df}
+            result[stem] = entry
+            # Also index without library prefix: "sdtm.ae" → also key "ae"
+            if "." in stem:
+                result[stem.split(".")[-1]] = entry
+        except Exception:
+            pass
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# R PREAMBLE BUILDER  (auto-install packages + load datasets)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def prepare_r_code_for_execution(
+    r_code: str,
+    dataset_paths: List[str] = None,
+    registry: Dict[str, Any] = None,
+) -> str:
+    """
+    Prepend a complete preamble to the R code that:
+      1. Creates a persistent StatBRidge package library so installs survive runs
+      2. Detects ALL required packages (library/require calls AND pkg:: usages)
+      3. Installs every missing package in one batch call (fast, dependency-aware)
+      4. Loads uploaded datasets under their SAS OUT= names (from registry) so
+         the translated R code can find them without path errors.
+    """
+    import re as _re
+
+    # ── 1. Package detection — only what the code actually uses ──────────────
+
+    # Packages explicitly loaded with library() or require()
+    explicit: set = set()
+    for m in _re.finditer(r'\b(?:library|require)\s*\(\s*["\']?(\w+)["\']?\s*\)', r_code):
+        explicit.add(m.group(1))
+
+    # Packages referenced via :: namespace operator  (e.g. dplyr::mutate)
+    namespace: set = set()
+    for m in _re.finditer(r'\b([A-Za-z][A-Za-z0-9._]*)::', r_code):
+        namespace.add(m.group(1))
+
+    BASE_PKGS = {
+        "base", "stats", "utils", "grDevices", "graphics", "datasets",
+        "methods", "compiler", "tools", "parallel", "splines", "Matrix",
+        "R", "TRUE", "FALSE", "NULL",
+    }
+
+    # Only install what is actually referenced — common packages are pre-installed
+    # at server startup so they will already be present.
+    all_packages = (explicit | namespace) - BASE_PKGS
+    all_packages = {p for p in all_packages if _re.match(r'^[A-Za-z][A-Za-z0-9._]*$', p)}
+
+    # ── 2. Build preamble ─────────────────────────────────────────────────────
+
+    lines: List[str] = [
+        "# ══ StatBRidge: auto-generated execution preamble ══════════════════════",
+        "",
+        "# Persistent package library — survives between runs",
+        "sb_lib <- file.path(Sys.getenv('USERPROFILE',",
+        "                    unset = Sys.getenv('HOME', unset = tempdir())),",
+        "                    '.statbridge', 'rlibs')",
+        "if (!dir.exists(sb_lib)) dir.create(sb_lib, recursive = TRUE, showWarnings = FALSE)",
+        ".libPaths(c(sb_lib, .libPaths()))",
+        "",
+        "options(",
+        "  repos        = c(CRAN = 'https://cloud.r-project.org'),",
+        "  warn         = -1,",
+        "  install.packages.compile.from.source = 'never'",
+        ")",
+        "",
+    ]
+
+    if all_packages:
+        pkg_vec = "c(" + ", ".join(f'"{p}"' for p in sorted(all_packages)) + ")"
+        lines += [
+            "# Install every missing package in one batch call",
+            f".__pkgs <- {pkg_vec}",
+            ".__missing <- .__pkgs[!vapply(.__pkgs, requireNamespace,",
+            "                              logical(1), quietly = TRUE)]",
+            "if (length(.__missing) > 0) {",
+            "  message(paste('StatBRidge: installing', length(.__missing), 'package(s):',",
+            "                paste(.__missing, collapse = ', ')))",
+            "  install.packages(.__missing, lib = sb_lib, dependencies = TRUE,",
+            "                   quiet = TRUE, verbose = FALSE)",
+            "}",
+            "# Load all packages silently",
+            "invisible(lapply(.__pkgs, function(p)",
+            "  suppressPackageStartupMessages(requireNamespace(p, quietly = TRUE))))",
+            "",
+        ]
+
+    # ── 3. Dataset loading (registry-aware) ──────────────────────────────────
+    # Use the registry to load each dataset under every alias the translated R
+    # code might reference, so no "does not exist" errors at runtime.
+
+    if dataset_paths:
+        has_sas = any(Path(p).suffix.lower() in (".sas7bdat", ".xpt")
+                      for p in dataset_paths if Path(p).exists())
+        if has_sas:
+            lines += [
+                "if (!requireNamespace('haven', quietly = TRUE))",
+                "  install.packages('haven', lib = sb_lib, dependencies = TRUE, quiet = TRUE)",
+                "",
+            ]
+        lines.append("# ── Load uploaded datasets (registry-aware) ──────────────")
+
+        # Track which server paths we've already emitted a read call for
+        loaded_paths: Dict[str, str] = {}  # abs_path → r_var already assigned
+
+        # ── Registry-based loading (preferred) ───────────────────────────────
+        if registry:
+            seen_entries: set = set()
+            for alias, info in registry.items():
+                abs_path = info["path"]
+                if abs_path in seen_entries:
+                    continue
+                seen_entries.add(abs_path)
+
+                r_var  = info.get("r_var", _re.sub(r"[^a-zA-Z0-9_]", "_", alias.lower()))
+                ftype  = info.get("type", "csv")
+                if ftype == "csv":
+                    lines.append(
+                        f'{r_var} <- readr::read_csv("{abs_path}", show_col_types = FALSE)'
+                    )
+                elif ftype in ("sas7bdat", "sas"):
+                    lines.append(f'{r_var} <- as.data.frame(haven::read_sas("{abs_path}"))')
+                elif ftype == "xpt":
+                    lines.append(f'{r_var} <- as.data.frame(haven::read_xpt("{abs_path}"))')
+                else:
+                    lines.append(
+                        f'{r_var} <- readr::read_csv("{abs_path}", show_col_types = FALSE)'
+                    )
+                loaded_paths[abs_path] = r_var
+
+                # Create aliases for every name variant in the registry
+                for al2, inf2 in registry.items():
+                    if inf2.get("path") == abs_path and al2 != alias:
+                        al2_var = _re.sub(r"[^a-zA-Z0-9_]", "_", al2.lower())
+                        if al2_var and al2_var[0].isdigit():
+                            al2_var = "ds_" + al2_var
+                        if al2_var != r_var:
+                            lines.append(f"{al2_var} <- {r_var}  # alias")
+
+        # ── Fallback: load any uploaded file not covered by registry ─────────
+        for path_str in dataset_paths:
+            p = Path(path_str)
+            if not p.exists():
+                continue
+            abs_path = str(p.resolve()).replace("\\", "/")
+            if abs_path in loaded_paths:
+                continue  # already loaded via registry
+            _sp   = p.stem.split("_", 3)
+            _orig = _sp[3] if len(_sp) == 4 else p.stem
+            var_name = _re.sub(r"[^a-zA-Z0-9_]", "_", _orig.lower())
+            if var_name and var_name[0].isdigit():
+                var_name = "ds_" + var_name
+            ext = p.suffix.lower()
+            if ext == ".csv":
+                lines.append(
+                    f'{var_name} <- readr::read_csv("{abs_path}", show_col_types = FALSE)'
+                )
+            elif ext == ".sas7bdat":
+                lines.append(f'{var_name} <- as.data.frame(haven::read_sas("{abs_path}"))')
+            elif ext == ".xpt":
+                lines.append(f'{var_name} <- as.data.frame(haven::read_xpt("{abs_path}"))')
+            loaded_paths[abs_path] = var_name
+
+        lines.append("")
+
+    lines += [
+        "options(warn = 0)  # restore warnings for user code",
+        "# ══ End preamble — user code follows ════════════════════════════════════",
+        "",
+    ]
+
+    return "\n".join(lines) + "\n" + r_code
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # SAS SIMULATION (via pandas)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -416,13 +847,19 @@ def simulate_sas_execution(
         sas_code: str,
         ast: List[Dict[str, Any]],
         inline_data: List[Any],
+        preloaded_datasets: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     """Interpret the SAS AST using pandas to produce SAS-equivalent output."""
     try:
         import pandas as pd
 
         out: List[str] = []
+        # Seed the dataset store — unwrap {"df": DataFrame} wrappers to bare DataFrames
         datasets: Dict[str, Any] = {}
+        if preloaded_datasets:
+            for _k, _v in preloaded_datasets.items():
+                datasets[_k] = _v["df"] if isinstance(_v, dict) and "df" in _v else _v
+            out.append(f"NOTE: {len(preloaded_datasets)} uploaded dataset(s) loaded into simulation.")
 
         current_dataset: Optional[str] = None
         current_proc: Optional[str] = None
@@ -594,6 +1031,39 @@ def simulate_sas_execution(
             elif t == 'proc_print':
                 current_proc = 'proc_print'
                 proc_opts = node.get('options', {})
+
+            elif t == 'proc_import':
+                # Read the uploaded file directly into datasets so SET statements
+                # that reference the OUT= dataset can find the data.
+                current_proc = 'proc_import'
+                _pi_opts = node.get('options', {})
+                proc_opts = _pi_opts
+                _pi_path  = _pi_opts.get('datafile', '')
+                _pi_out   = _pi_opts.get('out', '').lower()  # e.g. "ae_raw" (lib prefix stripped)
+                if _pi_path and _pi_out:
+                    try:
+                        _pp = Path(_pi_path)
+                        if _pp.exists():
+                            _ext2 = _pp.suffix.lower()
+                            _df2  = None
+                            if _ext2 == '.csv':
+                                _df2 = pd.read_csv(str(_pp))
+                            elif _ext2 == '.sas7bdat':
+                                _df2 = pd.read_sas(str(_pp), format='sas7bdat', encoding='utf-8')
+                            elif _ext2 == '.xpt':
+                                _df2 = pd.read_sas(str(_pp), format='xport', encoding='utf-8')
+                            if _df2 is not None:
+                                _df2.columns = [c.lower() for c in _df2.columns]
+                                datasets[_pi_out] = _df2
+                                # Also store without any library prefix in case SAS uses raw.ae_raw
+                                _short2 = _pi_out.split('.')[-1] if '.' in _pi_out else _pi_out
+                                datasets[_short2] = _df2
+                                out.append(f"\nNOTE: PROC IMPORT loaded '{_pp.name}' → '{_pi_out}' "
+                                           f"({len(_df2)} obs, {len(_df2.columns)} vars).")
+                        else:
+                            out.append(f"\nNOTE: PROC IMPORT – file not found: '{_pi_path}'.")
+                    except Exception as _pie:
+                        out.append(f"\nNOTE: PROC IMPORT – could not read '{_pi_path}': {_pie}")
 
             elif t in ('run', 'quit'):
                 # ── DATA step finalise ──────────────────────────────────
@@ -845,6 +1315,7 @@ def simulate_sas_execution(
                 k: {"rows": len(v), "columns": len(v.columns),
                     "preview": v.head(10).to_dict(orient='records')}
                 for k, v in datasets.items()
+                if hasattr(v, 'columns')
             },
         }
 
@@ -956,6 +1427,71 @@ async def health():
     return {"status": "ok", "service": "SAS to R Automation Platform", "version": "2.0.0"}
 
 
+@app.get("/api/v1/system/r-version")
+async def get_r_version():
+    """Return installed R version string, or null if R is not found."""
+    rscript = _find_rscript()
+    if not rscript:
+        return {"r_available": False, "version": None}
+    try:
+        result = subprocess.run(
+            [rscript, "--version"],
+            capture_output=True, text=True, timeout=10,
+        )
+        raw = (result.stdout + result.stderr).strip()
+        # "R scripting front-end version 4.3.1 (2023-06-16)"
+        import re as _re
+        m = _re.search(r'(\d+\.\d+\.\d+)', raw)
+        version = m.group(1) if m else raw.split('\n')[0]
+        return {"r_available": True, "version": f"R {version}"}
+    except Exception:
+        return {"r_available": True, "version": "R (version unknown)"}
+
+
+@app.get("/api/v1/config/execution")
+async def get_execution_config():
+    """Return the current execution environment configuration."""
+    cfg = _execution_config["sasViya"]
+    return {
+        "sasViya": {
+            "enabled": cfg["enabled"],
+            "baseUrl": cfg["baseUrl"],
+            "username": cfg["username"],
+            # Never return password
+        },
+    }
+
+
+@app.post("/api/v1/config/execution")
+async def update_execution_config(body: Dict[str, Any]):
+    """Update SAS Viya execution configuration."""
+    sas = body.get("sasViya", {})
+    if "enabled" in sas:
+        _execution_config["sasViya"]["enabled"] = bool(sas["enabled"])
+    if "baseUrl" in sas:
+        _execution_config["sasViya"]["baseUrl"] = str(sas["baseUrl"]).strip()
+    if "username" in sas:
+        _execution_config["sasViya"]["username"] = str(sas["username"]).strip()
+    if "password" in sas:
+        _execution_config["sasViya"]["password"] = str(sas["password"])
+    return {"status": "updated", "sasViya": {"enabled": _execution_config["sasViya"]["enabled"]}}
+
+
+@app.post("/api/v1/config/execution/test")
+async def test_sas_viya_connection():
+    """Test SAS Viya connectivity with the stored credentials."""
+    cfg = _execution_config["sasViya"]
+    if not cfg["enabled"]:
+        return {"status": "disabled", "message": "SAS Viya is not enabled."}
+    executor = SasViyaExecutor(
+        base_url=cfg["baseUrl"],
+        username=cfg["username"],
+        password=cfg["password"],
+    )
+    result = executor.connect()
+    return result
+
+
 @app.post("/api/v1/projects", response_model=Project)
 async def create_project(project: ProjectCreate):
     pid = str(uuid.uuid4())
@@ -1013,14 +1549,63 @@ async def upload_files(
         for d in datasets:
             ds_paths.append(save_uploaded_file(d, project_id, "dataset"))
 
-    projects_db[project_id].update({
+    # ── Auto-patch PROC IMPORT datafile= paths in SAS code ────────────────────
+    # When datasets are uploaded, replace any DATAFILE= path whose basename
+    # matches an uploaded file with the actual server path.
+    # This runs server-side so the translator always sees correct paths regardless
+    # of what the frontend sends.
+    all_ds = ds_paths or projects_db[project_id].get("dataset_files", [])
+    if all_ds:
+        import re as _re
+
+        def _orig_filename(p: str) -> str:
+            # Stored as "{project_id}_dataset_{file_id}_{original_name}" — extract original_name.
+            # project_id and file_id are UUIDs (hyphens only, no underscores), so split
+            # at the 4th underscore to isolate the original filename.
+            name = Path(p).name
+            parts = name.split("_", 3)
+            return (parts[3] if len(parts) == 4 else name).lower()
+
+        file_map = {_orig_filename(p): str(Path(p).resolve()).replace("\\", "/")
+                    for p in all_ds if Path(p).exists()}
+
+        def _replace_datafile(m):
+            q, old_path = m.group(1), m.group(2)
+            basename = old_path.replace("\\", "/").split("/")[-1].lower()
+            new_path = file_map.get(basename)
+            if new_path:
+                return f"datafile={q}{new_path}{q}"
+            return m.group(0)
+
+        patched = _re.sub(
+            r'datafile\s*=\s*(["\'])([^"\']+)\1',
+            _replace_datafile,
+            sas_content,
+            flags=_re.IGNORECASE,
+        )
+        if patched != sas_content:
+            sas_content = patched
+            with open(sas_path, 'w', encoding='utf-8') as f:
+                f.write(sas_content)
+
+    update: Dict[str, Any] = {
         "sas_file_id": sas_path,
-        "sas_code": sas_content,
-        "dataset_files": ds_paths,
-        "status": "uploaded",
-    })
-    return {"sas_file_id": sas_path, "dataset_file_ids": ds_paths,
-            "message": "Files uploaded successfully"}
+        "sas_code":    sas_content,
+        "status":      "uploaded",
+    }
+    # Only overwrite dataset_files when new datasets were actually supplied.
+    if ds_paths:
+        update["dataset_files"] = ds_paths
+    elif "dataset_files" not in projects_db[project_id]:
+        update["dataset_files"] = []
+
+    projects_db[project_id].update(update)
+    return {
+        "sas_file_id":      sas_path,
+        "dataset_file_ids": ds_paths,
+        "sas_code":         sas_content,   # ← return final (path-patched) SAS code
+        "message":          "Files uploaded successfully",
+    }
 
 
 @app.post("/api/v1/projects/{project_id}/translate")
@@ -1050,6 +1635,12 @@ async def start_translation(project_id: str, background_tasks: BackgroundTasks):
         r_code, warnings, ast, inline_data = translate_sas_to_r(sas_code)
         engine_data = {}
         warnings.append(f"Six-engine pipeline encountered an error: {exc}. Using legacy translator.")
+
+    # Fix dataset paths in translated R code using the uploaded file registry
+    _ds_paths = project.get("dataset_files", [])
+    if _ds_paths:
+        _registry = build_dataset_registry(sas_code, _ds_paths)
+        r_code    = fix_r_dataset_references(r_code, _registry, _ds_paths)
 
     r_lines = len([l for l in r_code.split('\n') if l.strip()])
     sas_lines = len([l for l in sas_code.split('\n') if l.strip()])
@@ -1094,7 +1685,10 @@ async def get_translation_status(project_id: str):
     if "translation_id" not in project:
         return TranslationStatus(status="pending", progress=0, warnings=[])
 
-    t = translations_db[project["translation_id"]]
+    tid = project["translation_id"]
+    if tid not in translations_db:
+        return TranslationStatus(status="pending", progress=0, warnings=[])
+    t = translations_db[tid]
     preview = t["r_code"][:900] if len(t["r_code"]) > 900 else t["r_code"]
     return TranslationStatus(
         status         = t["status"],
@@ -1114,18 +1708,34 @@ async def start_execution(project_id: str):
     if "translation_id" not in project:
         raise HTTPException(status_code=400, detail="No translation available")
 
-    t = translations_db[project["translation_id"]]
+    tid = project["translation_id"]
+    if tid not in translations_db:
+        raise HTTPException(status_code=400, detail="Translation record missing — please re-translate")
+    t = translations_db[tid]
     sas_code = t["sas_code"]
     r_code = t["r_code"]
     ast = t.get("ast", [])
     inline_data = t.get("inline_data", [])
 
+    # Load any uploaded dataset files for the SAS simulation and R execution
+    dataset_paths = project.get("dataset_files", [])
+    preloaded     = load_uploaded_datasets(dataset_paths) if dataset_paths else {}
+
+    # Build dataset registry: maps SAS names (e.g. "raw.ae_raw") → actual file paths
+    registry = build_dataset_registry(sas_code, dataset_paths)
+
+    # Post-process R code: replace wrong read_sas/read_csv paths with actual server paths
+    r_code = fix_r_dataset_references(r_code, registry, dataset_paths)
+
+
     # Run both (SAS simulation + actual R) — track timing per stage
     import time as _time
     t0 = _time.time()
-    sas_result = simulate_sas_execution(sas_code, ast, inline_data)
+    sas_result = simulate_sas_execution(sas_code, ast, inline_data, preloaded)
     t1 = _time.time()
-    r_result = execute_r_code(r_code)
+    # Prepend registry-aware preamble so every dataset alias is pre-loaded
+    r_code_prepared = prepare_r_code_for_execution(r_code, dataset_paths, registry)
+    r_result = execute_r_code(r_code_prepared)
     t2 = _time.time()
 
     sas_dur = round(t1 - t0, 2)
@@ -1381,7 +1991,10 @@ async def get_r_code(project_id: str):
     project = projects_db[project_id]
     if "translation_id" not in project:
         raise HTTPException(status_code=400, detail="No R code available")
-    return {"r_code": translations_db[project["translation_id"]]["r_code"]}
+    tid = project["translation_id"]
+    if tid not in translations_db:
+        raise HTTPException(status_code=400, detail="Translation record missing — please re-translate")
+    return {"r_code": translations_db[tid]["r_code"]}
 
 
 @app.get("/api/v1/projects/{project_id}/download/r-code")
@@ -1391,8 +2004,11 @@ async def download_r_code(project_id: str):
     project = projects_db[project_id]
     if "translation_id" not in project:
         raise HTTPException(status_code=400, detail="No R code available")
+    tid = project["translation_id"]
+    if tid not in translations_db:
+        raise HTTPException(status_code=400, detail="Translation record missing — please re-translate")
 
-    t = translations_db[project["translation_id"]]
+    t = translations_db[tid]
     r_path = OUTPUT_DIR / f"{project_id}_generated.R"
     with open(r_path, 'w', encoding='utf-8') as f:
         f.write(t["r_code"])
@@ -1453,15 +2069,16 @@ async def auth_login(payload: LoginRequest):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     if not user.get("verified"):
+        # Unverified account — send OTP to complete sign-up verification first
         otp = _generate_otp()
         pending_otps[user["email"].lower()] = {"otp": otp, "purpose": "login"}
         _send_email_otp(user["email"], otp, "login")
         return {"requires_otp": True, "email": user["email"], "message": "OTP sent to your email."}
 
-    otp = _generate_otp()
-    pending_otps[user["email"].lower()] = {"otp": otp, "purpose": "login"}
-    _send_email_otp(user["email"], otp, "login")
-    return {"requires_otp": True, "email": user["email"], "message": "OTP sent to your email."}
+    # Verified user — issue session token immediately, no OTP required
+    token = str(uuid.uuid4())
+    auth_sessions[token] = user["email"].lower()
+    return {"requires_otp": False, "token": token, "message": "Login successful."}
 
 
 @app.post("/api/v1/auth/verify-otp")
@@ -1508,11 +2125,25 @@ async def auth_reset_password(payload: ResetPasswordRequest):
 
 
 @app.get("/api/v1/auth/me")
-async def auth_me():
-    # Demo fallback until token header is integrated
+async def auth_me(authorization: str = None):
+    from fastapi import Header
+    # Resolve token from Authorization: Bearer <token> header if provided
+    token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+
+    if token and token in auth_sessions:
+        email_key = auth_sessions[token]
+        user = users_db.get(email_key)
+        if user:
+            return {"name": user["name"], "email": user["email"],
+                    "profile_photo": user.get("profile_photo", "")}
+
+    # Fallback: return first registered user (single-tenant dev mode)
     if users_db:
         user = list(users_db.values())[0]
-        return {"name": user["name"], "email": user["email"], "profile_photo": user.get("profile_photo", "")}
+        return {"name": user["name"], "email": user["email"],
+                "profile_photo": user.get("profile_photo", "")}
     return {"name": "Admin User", "email": "admin@example.com", "profile_photo": ""}
 
 

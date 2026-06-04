@@ -1,13 +1,13 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import {
   ArrowRight, AlertCircle, CheckCircle2, Download, RefreshCw,
   Clock, Database, BarChart2, Cpu, HardDrive, Zap, Activity,
   ChevronDown, ChevronUp, Eye, Search, X, Code, FileText,
-  Terminal, Table, PieChart, AlertTriangle, Loader2,
+  Terminal, Table, PieChart, AlertTriangle, Loader2, Server, Layers,
 } from 'lucide-react';
-import { projectsApi } from '@/services/api';
+import { projectsApi, systemApi } from '@/services/api';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -459,6 +459,18 @@ const ExecutionStep: React.FC = () => {
   const [expandROutput, setExpandROutput] = useState(false);
   const [rerunCount, setRerunCount] = useState(0);
 
+  const { data: rVersion } = useQuery({
+    queryKey: ['r-version'],
+    queryFn: systemApi.getRVersion,
+    staleTime: 60_000,
+  });
+  const { data: execConfig } = useQuery({
+    queryKey: ['exec-config'],
+    queryFn: systemApi.getExecutionConfig,
+    staleTime: 30_000,
+  });
+  const sasViyaEnabled = execConfig?.sasViya?.enabled ?? false;
+
   const executionMutation = useMutation({
     mutationFn: () => projectsApi.startExecution(projectId!),
     onSuccess: (data: ExecutionResult) => {
@@ -517,7 +529,7 @@ const ExecutionStep: React.FC = () => {
 
   const TABS: Array<{ key: OutputTab; label: string; icon: React.ReactNode }> = [
     { key: 'sas',        label: 'SAS Output',      icon: <Terminal className="w-3.5 h-3.5" /> },
-    { key: 'r',          label: 'R Output',         icon: <Code className="w-3.5 h-3.5" /> },
+    { key: 'r',          label: 'R Output (Executed)', icon: <Code className="w-3.5 h-3.5" /> },
     { key: 'datasets',   label: 'Dataset Preview',  icon: <Table className="w-3.5 h-3.5" /> },
     { key: 'statistics', label: 'Statistics',       icon: <PieChart className="w-3.5 h-3.5" /> },
     { key: 'logs',       label: 'Logs',             icon: <FileText className="w-3.5 h-3.5" /> },
@@ -545,7 +557,9 @@ const ExecutionStep: React.FC = () => {
               </div>
               <div>
                 <h2 className="text-lg font-extrabold text-slate-900 leading-tight">Execution Center</h2>
-                <p className="text-xs text-slate-500 mt-0.5">SAS (Simulated) and R Execution in Parallel</p>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  SAS {sasViyaEnabled ? '(SAS Viya)' : '(Simulated)'} · R (Local Interpreter)
+                </p>
               </div>
             </div>
             <div className="flex items-center gap-3 flex-shrink-0">
@@ -568,6 +582,39 @@ const ExecutionStep: React.FC = () => {
                 <RefreshCw className={`w-3.5 h-3.5 ${isRunning ? 'animate-spin' : ''}`} />
                 Re-run
               </button>
+            </div>
+          </div>
+        </div>
+
+        {/* ── Execution Environment ─────────────────────────────────────────── */}
+        <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5">
+          <p className="text-xs font-bold text-slate-500 uppercase tracking-wide mb-3">Execution Environment</p>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 bg-[#eef3f8] rounded-lg flex items-center justify-center flex-shrink-0">
+                <Layers className="w-4 h-4 text-[#1f4368]" />
+              </div>
+              <div>
+                <p className="text-[11px] text-slate-400 font-medium">SAS Runtime</p>
+                <p className={`text-sm font-bold ${sasViyaEnabled ? 'text-emerald-700' : 'text-slate-700'}`}>
+                  {sasViyaEnabled ? 'SAS Viya (ODA)' : 'Simulated'}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${
+                rVersion?.r_available ? 'bg-emerald-50' : 'bg-amber-50'
+              }`}>
+                <Server className={`w-4 h-4 ${rVersion?.r_available ? 'text-emerald-600' : 'text-amber-600'}`} />
+              </div>
+              <div>
+                <p className="text-[11px] text-slate-400 font-medium">R Runtime</p>
+                <p className={`text-sm font-bold ${rVersion?.r_available ? 'text-emerald-700' : 'text-amber-700'}`}>
+                  {rVersion?.r_available
+                    ? (rVersion.version ?? 'Local R Interpreter')
+                    : 'R Not Installed'}
+                </p>
+              </div>
             </div>
           </div>
         </div>
