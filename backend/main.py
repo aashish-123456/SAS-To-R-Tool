@@ -568,27 +568,42 @@ def fix_r_dataset_references(
         if var_name:
             info = _reg.get(var_name.lower())
             if not info:
+                # Try fuzzy matching on variable name
                 for k, v in _reg.items():
                     if var_name.lower() in k or k in var_name.lower():
                         info = v
                         break
             if info:
-                return info["path"]
+                return info["path"].replace("\\", "/")
 
-        # 2. Registry lookup by path stem
+        # 2. Registry lookup by path stem (filename without extension)
         bn   = path_in_code.replace("\\", "/").split("/")[-1].lower()
         stem = bn.rsplit(".", 1)[0] if "." in bn else bn
+
+        # Try exact stem match first
         info = _reg.get(stem)
         if not info:
+            # Try fuzzy matching on stem
             for k, v in _reg.items():
-                if stem in k or k in stem:
+                k_stem = k.split(".")[-1] if "." in k else k  # Get last component after dots
+                if stem in k or k in stem or stem in k_stem or k_stem in stem:
                     info = v
                     break
         if info:
-            return info["path"]
+            return info["path"].replace("\\", "/")
 
-        # 3. Fallback: first uploaded CSV on disk
-        return _first_csv()
+        # 3. Direct dataset_paths lookup by filename
+        if dataset_paths:
+            for p in dataset_paths:
+                p_path = Path(p)
+                # Match if the filename (without uuid/project prefix) matches
+                p_name = p_path.name.lower()
+                if bn in p_name or stem in p_name:
+                    return str(p_path).replace("\\", "/")
+
+        # 4. Fallback: first uploaded file of any type on disk
+        if _abs_ds:
+            return str(_abs_ds[0]).replace("\\", "/")
 
     def _make_read(server_path: str) -> str:
         ext = Path(server_path).suffix.lower()
@@ -618,13 +633,19 @@ def fix_r_dataset_references(
         correct = _resolve(m.group(1))
         return _make_read(correct) if correct else m.group(0)
 
-    for pat in [
+    # Comprehensive pattern list to catch all read function calls
+    patterns = [
         r'haven::read_sas\s*\(\s*["\']([^"\']+)["\'][^)]*\)',
         r'haven::read_xpt\s*\(\s*["\']([^"\']+)["\'][^)]*\)',
         r'readr::read_csv\s*\(\s*["\']([^"\']+)["\'][^)]*\)',
         r'readr::read_delim\s*\(\s*["\']([^"\']+)["\'][^)]*\)',
         r'(?<![:\w])read\.csv\s*\(\s*["\']([^"\']+)["\'][^)]*\)',
-    ]:
+        r'read_sas\s*\(\s*["\']([^"\']+)["\'][^)]*\)',  # without namespace
+        r'read_xpt\s*\(\s*["\']([^"\']+)["\'][^)]*\)',   # without namespace
+        r'read_csv\s*\(\s*["\']([^"\']+)["\'][^)]*\)',   # without namespace
+    ]
+
+    for pat in patterns:
         r_code = re.sub(pat, _repl_bare, r_code, flags=re.I)
 
     return r_code
