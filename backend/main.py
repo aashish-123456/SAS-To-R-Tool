@@ -775,29 +775,33 @@ def prepare_r_code_for_execution(
             seen_entries: set = set()
             for alias, info in registry.items():
                 abs_path = info["path"]
+                # Normalize path separators for R
+                abs_path = abs_path.replace("\\", "/")
+
                 if abs_path in seen_entries:
                     continue
                 seen_entries.add(abs_path)
 
                 r_var  = info.get("r_var", _re.sub(r"[^a-zA-Z0-9_]", "_", alias.lower()))
-                ftype  = info.get("type", "csv")
+                ftype  = info.get("type", "csv").lower()
+
+                # Generate appropriate read statement based on file type
                 if ftype == "csv":
-                    lines.append(
-                        f'{r_var} <- readr::read_csv("{abs_path}", show_col_types = FALSE)'
-                    )
+                    read_stmt = f'readr::read_csv("{abs_path}", show_col_types = FALSE)'
                 elif ftype in ("sas7bdat", "sas"):
-                    lines.append(f'{r_var} <- as.data.frame(haven::read_sas("{abs_path}"))')
+                    read_stmt = f'as.data.frame(haven::read_sas("{abs_path}"))'
                 elif ftype == "xpt":
-                    lines.append(f'{r_var} <- as.data.frame(haven::read_xpt("{abs_path}"))')
+                    read_stmt = f'as.data.frame(haven::read_xpt("{abs_path}"))'
                 else:
-                    lines.append(
-                        f'{r_var} <- readr::read_csv("{abs_path}", show_col_types = FALSE)'
-                    )
+                    # Default to CSV for unknown types
+                    read_stmt = f'readr::read_csv("{abs_path}", show_col_types = FALSE)'
+
+                lines.append(f'{r_var} <- {read_stmt}')
                 loaded_paths[abs_path] = r_var
 
                 # Create aliases for every name variant in the registry
                 for al2, inf2 in registry.items():
-                    if inf2.get("path") == abs_path and al2 != alias:
+                    if inf2.get("path").replace("\\", "/") == abs_path and al2 != alias:
                         al2_var = _re.sub(r"[^a-zA-Z0-9_]", "_", al2.lower())
                         if al2_var and al2_var[0].isdigit():
                             al2_var = "ds_" + al2_var
@@ -809,15 +813,22 @@ def prepare_r_code_for_execution(
             p = Path(path_str)
             if not p.exists():
                 continue
-            abs_path = str(p.resolve()).replace("\\", "/")
+            # Use absolute path if possible, fallback to normalized path
+            try:
+                abs_path = str(p.resolve()).replace("\\", "/")
+            except (OSError, RuntimeError):
+                abs_path = str(p.absolute()).replace("\\", "/")
+
             if abs_path in loaded_paths:
                 continue  # already loaded via registry
+
             _sp   = p.stem.split("_", 3)
             _orig = _sp[3] if len(_sp) == 4 else p.stem
             var_name = _re.sub(r"[^a-zA-Z0-9_]", "_", _orig.lower())
             if var_name and var_name[0].isdigit():
                 var_name = "ds_" + var_name
             ext = p.suffix.lower()
+
             if ext == ".csv":
                 lines.append(
                     f'{var_name} <- readr::read_csv("{abs_path}", show_col_types = FALSE)'
@@ -826,6 +837,10 @@ def prepare_r_code_for_execution(
                 lines.append(f'{var_name} <- as.data.frame(haven::read_sas("{abs_path}"))')
             elif ext == ".xpt":
                 lines.append(f'{var_name} <- as.data.frame(haven::read_xpt("{abs_path}"))')
+            else:
+                lines.append(
+                    f'{var_name} <- readr::read_csv("{abs_path}", show_col_types = FALSE)'
+                )
             loaded_paths[abs_path] = var_name
 
         lines.append("")
