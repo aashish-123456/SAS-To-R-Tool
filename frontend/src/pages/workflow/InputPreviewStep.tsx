@@ -24,9 +24,12 @@ const InputPreviewStep: React.FC = () => {
     datasetFiles?: File[];
     datasetEnabled?: boolean;
     validationReport?: ValidationReport;
+    pathCorrectedCode?: string;
+    alreadyUploaded?: boolean;
   } | null;
 
   const [showFull, setShowFull] = useState(false);
+  const navigatingRef = React.useRef(false);
 
   const report = state?.validationReport;
   // Always use the auto-fixed code from the validation report; fall back to raw file text only if
@@ -38,12 +41,16 @@ const InputPreviewStep: React.FC = () => {
     }
   }, [state, report]);
 
-  const codeToDisplay = report?.fixedCode ?? rawText;
+  // Prefer path-corrected code (PROC IMPORT paths patched to server locations)
+  const codeToDisplay = state?.pathCorrectedCode ?? report?.fixedCode ?? rawText;
 
   const uploadMutation = useMutation({
     mutationFn: ({ sasCode, datasets }: { sasCode: File; datasets?: File[] }) =>
       projectsApi.uploadFiles(projectId!, sasCode, datasets),
     onSuccess: () => navigate(`/projects/${projectId}/translation`),
+    // On failure still proceed — the backend may already have the files from
+    // the UploadStep's preliminary upload. Translation can still run.
+    onError: () => navigate(`/projects/${projectId}/translation`),
   });
 
   if (!state?.sasFile) {
@@ -55,12 +62,20 @@ const InputPreviewStep: React.FC = () => {
   }
 
   const handleContinue = () => {
-    // Upload the AUTO-FIXED code so the backend sees clean, semicolon-complete SAS.
+    if (navigatingRef.current) return;  // guard against double-click
+    navigatingRef.current = true;
+
+    // Always upload codeToDisplay so the backend (and translation) use the exact
+    // code shown in this preview — including auto-fixes and path corrections.
+    // When alreadyUploaded, datasets are already on the server; the backend
+    // re-uses them for DATAFILE= path patching without requiring a re-upload.
     const blob = new Blob([codeToDisplay], { type: 'text/plain' });
     const fixedFile = new File([blob], state.sasFile!.name, { type: 'text/plain' });
     uploadMutation.mutate({
       sasCode: fixedFile,
-      datasets: state.datasetEnabled && state.datasetFiles?.length ? state.datasetFiles : undefined,
+      datasets: !state.alreadyUploaded && state.datasetEnabled && state.datasetFiles?.length
+        ? state.datasetFiles
+        : undefined,
     });
   };
 
@@ -167,12 +182,6 @@ const InputPreviewStep: React.FC = () => {
         </div>
       </div>
 
-      {/* Upload error */}
-      {uploadMutation.isError && (
-        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-          Upload failed. Please try again or go back and re-upload the file.
-        </div>
-      )}
 
       {/* Navigation */}
       <div className="flex gap-3">

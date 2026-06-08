@@ -121,6 +121,18 @@ class RCodeGenerator:
                 result.append(part)
         return ''.join(result)
 
+    def _sanitize_var_name(self, name: str) -> str:
+        """Convert SAS variable names to valid R identifiers.
+        - Remove leading underscores (SAS convention, not R-valid)
+        - Keep the rest of the name as-is
+        """
+        if not name:
+            return name
+        # Remove leading underscores, but keep underscores elsewhere
+        sanitized = name.lstrip('_')
+        # If all underscores were removed, prefix with 'var_'
+        return sanitized if sanitized else f"var_{name.replace('_', '')}"
+
     # ── mutation buffer ───────────────────────────────────────────────────
 
     def _flush_mutations(self):
@@ -129,11 +141,23 @@ class RCodeGenerator:
             self._pending_mutations = []
             return
         ds = self.current_dataset
-        if len(self._pending_mutations) == 1:
-            v, e = self._pending_mutations[0]
+
+        # Filter out incomplete mutations and sanitize variable names
+        valid_mutations = []
+        for v, e in self._pending_mutations:
+            if v and e and str(e).strip():
+                sanitized_v = self._sanitize_var_name(v)
+                valid_mutations.append((sanitized_v, e))
+
+        if not valid_mutations:
+            self._pending_mutations = []
+            return
+
+        if len(valid_mutations) == 1:
+            v, e = valid_mutations[0]
             self.pending_data_ops += [f"{ds} <- {ds} %>%", f"  mutate({v} = {e})"]
         else:
-            parts = [f"    {v} = {e}" for v, e in self._pending_mutations]
+            parts = [f"    {v} = {e}" for v, e in valid_mutations]
             self.pending_data_ops += (
                 [f"{ds} <- {ds} %>%", "  mutate("]
                 + [p + "," for p in parts[:-1]]
@@ -528,6 +552,7 @@ class RCodeGenerator:
             if self._do_phase == 1 and self._if_do_body:
                 self._flush_mutations()
                 for var, expr in self._if_do_body:
+                    var = self._sanitize_var_name(var)  # Sanitize variable name
                     self.pending_data_ops.append(f"{self.current_dataset} <- {self.current_dataset} %>%")
                     self.pending_data_ops.append(f"  mutate({var} = if_else({self._do_condition}, {expr}, NA))")
                 self._do_phase = 0
@@ -608,6 +633,11 @@ class RCodeGenerator:
             self._emit_proc_corr()
         elif self.current_proc == 'proc_import':
             self._emit_proc_import()
+            # Track the output dataset as created so SET statements won't try to re-read it
+            out_ds = self.proc_opts.get('data') or self.proc_opts.get('out') or 'imported_data'
+            # Extract just the dataset name (part after dot if it's lib.dataset)
+            ds_name = out_ds.split('.')[-1] if '.' in str(out_ds) else out_ds
+            self._created_datasets.add(ds_name)
         elif self.current_proc == 'proc_sql':
             self._emit_proc_sql()
 
@@ -721,6 +751,9 @@ class RCodeGenerator:
         if var.lower() in self._PROC_OPTION_VARS and self.current_proc not in (None, 'data'):
             return
 
+        # Sanitize variable name (remove leading underscores for R compatibility)
+        var = self._sanitize_var_name(var)
+
         # Intercept assignments inside indexed DO loops
         if self._do_loop_active:
             self._do_loop_body.append(f"{var} = {expr}")
@@ -748,14 +781,15 @@ class RCodeGenerator:
 
         if ds and '=' in then:
             var = then.split('=')[0].strip()
-            tv = then.split('=', 1)[1].strip().replace("'", '"')
+            var = self._sanitize_var_name(var)  # Sanitize variable name
+            tv = self._sas2r(then.split('=', 1)[1].strip()).replace("'", '"')
             op_lines = [
                 f"{ds} <- {ds} %>%",
                 f"  mutate({var} = case_when(",
                 f"    {cond} ~ {tv},",
             ]
             if else_ and '=' in else_:
-                ev = else_.split('=', 1)[1].strip().replace("'", '"')
+                ev = self._sas2r(else_.split('=', 1)[1].strip()).replace("'", '"')
                 op_lines.append(f"    TRUE ~ {ev}")
             else:
                 op_lines.append("    TRUE ~ NA_character_")
@@ -1006,7 +1040,7 @@ class RCodeGenerator:
                 if '=' in clause:
                     var, val = clause.split('=', 1)
                     var = var.strip()
-                    val = val.strip().replace("'", '"')
+                    val = self._sas2r(val.strip()).replace("'", '"')
                     if first_assign is None:
                         first_assign = var
                     if var == first_assign:
@@ -1016,13 +1050,14 @@ class RCodeGenerator:
                 if '=' in clause:
                     var, val = clause.split('=', 1)
                     var = var.strip()
-                    val = val.strip().replace("'", '"')
+                    val = self._sas2r(val.strip()).replace("'", '"')
                     if first_assign is None:
                         first_assign = var
                     if var == first_assign:
                         default_val = val
 
         if first_assign and cases:
+            first_assign = self._sanitize_var_name(first_assign)  # Sanitize variable name
             op_lines = [
                 f"{self.current_dataset} <- {self.current_dataset} %>%",
                 f"  mutate({first_assign} = case_when(",
@@ -1583,7 +1618,8 @@ class RCodeGenerator:
 
     def _emit_proc_import(self):
         opts    = self.proc_opts
-        out_ds  = opts.get('data', 'imported_data')
+        # PROC IMPORT can use either DATA= or OUT= for the output dataset
+        out_ds  = opts.get('data') or opts.get('out') or 'imported_data'
         datafile = opts.get('datafile', 'input_file')
         dbms    = opts.get('dbms', 'csv')
         self.lines.append(f"# PROC IMPORT: Read {datafile}")
@@ -1641,7 +1677,32 @@ class RCodeGenerator:
         r = re.sub(r'\bcats\s*\(',     'paste0(', r, flags=re.I)
         r = re.sub(r'\bcatt\s*\(',     'paste0(', r, flags=re.I)
         r = re.sub(r'\bsubstr\s*\(',   'substr(', r, flags=re.I)
-        r = re.sub(r'\bindex\s*\(',    'regexpr(', r, flags=re.I)
+        
+        # index(string, pattern) → grepl(pattern, string) — swap arguments!
+        # First convert index to grepl, then swap the arguments
+        def _translate_index(m: re.Match) -> str:
+            inner = m.group(1)
+            # Parse the two arguments: string and pattern
+            # Need to handle nested parens correctly
+            depth = 0
+            first_comma = -1
+            for i, ch in enumerate(inner):
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                elif ch == ',' and depth == 0:
+                    first_comma = i
+                    break
+            if first_comma == -1:
+                # No comma found, keep as is
+                return f'grepl({inner})'
+            string_arg = inner[:first_comma].strip()
+            pattern_arg = inner[first_comma+1:].strip()
+            return f'grepl({pattern_arg}, {string_arg})'
+        
+        r = re.sub(r'\bindex\s*\(([^)]+)\)', _translate_index, r, flags=re.I)
+        
         r = re.sub(r'\bcompress\s*\(', 'gsub(" ", "", ', r, flags=re.I)
         r = re.sub(r'\btranwrd\s*\(',  'gsub(', r, flags=re.I)
         r = re.sub(r'\bscan\s*\(',     'strsplit(', r, flags=re.I)

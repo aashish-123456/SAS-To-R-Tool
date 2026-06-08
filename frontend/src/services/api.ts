@@ -10,6 +10,13 @@ const api = axios.create({
   },
 });
 
+// Attach stored auth token to every request
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('authToken');
+  if (token) config.headers['Authorization'] = `Bearer ${token}`;
+  return config;
+});
+
 export interface Project {
   id: string;
   name: string;
@@ -103,7 +110,12 @@ export const projectsApi = {
   getAll: async (): Promise<Project[]> => (await api.get('/projects')).data,
   getById: async (id: string): Promise<Project> => (await api.get(`/projects/${id}`)).data,
   create: async (data: { name: string; description?: string }): Promise<Project> => (await api.post('/projects', data)).data,
-  uploadFiles: async (projectId: string, sasCode: File, datasets?: File[]) => {
+  uploadFiles: async (projectId: string, sasCode: File, datasets?: File[]): Promise<{
+    sas_file_id: string;
+    dataset_file_ids: string[];
+    sas_code: string;
+    message: string;
+  }> => {
     const formData = new FormData();
     formData.append('sas_code', sasCode);
     if (datasets) datasets.forEach((file) => formData.append('datasets', file));
@@ -118,6 +130,17 @@ export const projectsApi = {
   getRCodeDownloadUrl: (projectId: string) => `${API_BASE_URL}/api/v1/projects/${projectId}/download/r-code`,
   getRCode: async (projectId: string): Promise<{ r_code: string }> => (await api.get(`/projects/${projectId}/r-code`)).data,
   getExecutionOutput: async (projectId: string) => (await api.get(`/projects/${projectId}/execution/output`)).data,
+};
+
+export const systemApi = {
+  getRVersion: async (): Promise<{ r_available: boolean; version: string | null }> =>
+    (await api.get('/system/r-version')).data,
+  getExecutionConfig: async (): Promise<{ sasViya: { enabled: boolean; baseUrl: string; username: string } }> =>
+    (await api.get('/config/execution')).data,
+  updateExecutionConfig: async (config: { sasViya: { enabled?: boolean; baseUrl?: string; username?: string; password?: string } }) =>
+    (await api.post('/config/execution', config)).data,
+  testSasViyaConnection: async (): Promise<{ status: string; message?: string }> =>
+    (await api.post('/config/execution/test', {})).data,
 };
 
 export const authApi = {

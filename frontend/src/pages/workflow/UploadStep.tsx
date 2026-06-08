@@ -1,11 +1,81 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useDropzone } from 'react-dropzone';
+import { projectsApi } from '@/services/api';
 import {
   Upload, File, X, CheckCircle2, AlertTriangle, AlertCircle,
   ChevronDown, ChevronRight, Wrench, ShieldAlert, ArrowRight,
-  Cpu, ClipboardList, Zap, Info,
+  Cpu, ClipboardList, Zap, Info, Copy, Check, Database,
+  FileSearch, PackageCheck, PackageX,
 } from 'lucide-react';
+
+// ─────────────────────────────────────────────────────────────
+// DEPENDENCY ANALYSIS TYPES + ENGINE
+// ─────────────────────────────────────────────────────────────
+
+interface DepItem {
+  type: 'dataset' | 'file';
+  name: string;       // logical name, e.g. "sdtm.ae" or "patients.xlsx"
+  rawPath?: string;   // original path from PROC IMPORT datafile=
+}
+
+interface DepAnalysis {
+  selfContained: boolean;
+  required: DepItem[];
+  created: string[];
+}
+
+function analyzeDeps(code: string): DepAnalysis {
+  const created = new Set<string>();
+  const required = new Set<string>();
+  const fileItems: DepItem[] = [];
+
+  // DATA step output
+  for (const m of code.matchAll(/\bDATA\s+([\w.]+)/gi)) {
+    const ds = m[1].toLowerCase();
+    if (ds !== '_null_' && !ds.startsWith('work._null_')) created.add(ds);
+  }
+  // PROC IMPORT OUT=
+  for (const m of code.matchAll(/\bOUT\s*=\s*([\w.]+)/gi))
+    created.add(m[1].toLowerCase());
+
+  // SET / MERGE / UPDATE / MODIFY → external datasets
+  for (const m of code.matchAll(/\b(?:SET|MERGE|UPDATE|MODIFY)\b([^;]+);/gi)) {
+    for (const token of m[1].trim().split(/\s+/)) {
+      const clean = token.replace(/\([^)]*\)/g, '').trim().toLowerCase();
+      if (clean && /^[\w.]+$/.test(clean) && !clean.startsWith('('))
+        required.add(clean);
+    }
+  }
+  // SQL FROM / JOIN
+  for (const m of code.matchAll(/\b(?:FROM|JOIN)\s+([\w.]+)/gi)) {
+    const ds = m[1].toLowerCase();
+    if (!['where', 'on', 'as', 'outer', 'inner', 'left', 'right', 'full', 'cross'].includes(ds))
+      required.add(ds);
+  }
+  // PROC IMPORT DATAFILE=
+  for (const m of code.matchAll(/DATAFILE\s*=\s*["']([^"']+)["']/gi)) {
+    const fullPath = m[1];
+    const fileName = fullPath.split(/[/\\]/).pop() ?? fullPath;
+    fileItems.push({ type: 'file', name: fileName, rawPath: fullPath });
+    // mark as created so it won't also appear in missing datasets
+    const stem = fileName.replace(/\.[^.]+$/, '').toLowerCase();
+    created.add(stem);
+  }
+
+  // missing = required − created
+  const missing = [...required].filter(r => !created.has(r));
+  const allRequired: DepItem[] = [
+    ...missing.map(name => ({ type: 'dataset' as const, name })),
+    ...fileItems,
+  ];
+
+  return {
+    selfContained: allRequired.length === 0,
+    required: allRequired,
+    created: [...created],
+  };
+}
 
 // ─────────────────────────────────────────────────────────────
 // TYPES
@@ -581,6 +651,7 @@ const UploadStep: React.FC = () => {
   const [phase, setPhase] = useState<Phase>('idle');
   const [sasFile, setSasFile] = useState<File | null>(null);
   const [report, setReport] = useState<ValidationReport | null>(null);
+  const [depAnalysis, setDepAnalysis] = useState<DepAnalysis | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [showAutoFixDetail, setShowAutoFixDetail] = useState(false);
   const [showWarningDetail, setShowWarningDetail] = useState(false);
@@ -588,13 +659,125 @@ const UploadStep: React.FC = () => {
   const [datasetEnabled, setDatasetEnabled] = useState(false);
   const [datasetError, setDatasetError] = useState('');
   const [fileError, setFileError] = useState('');
+  const [copiedPath, setCopiedPath] = useState<string | null>(null);
+
+  // Server-side paths returned after upload
+  const [serverPaths, setServerPaths]             = useState<Record<string, string>>({});
+  const [pathCorrectedCode, setPathCorrectedCode] = useState('');
+  const [isUploadingToServer, setIsUploadingToServer] = useState(false);
+
+  // Refs so the async .then() always reads the latest values, never a stale closure
+  const depAnalysisRef = useRef<DepAnalysis | null>(null);
+  const reportRef      = useRef<ValidationReport | null>(null);
+
+  // Keep refs in sync with state on every render
+  depAnalysisRef.current = depAnalysis;
+  reportRef.current      = report;
+
+  // ── Effect 1: Immediate display update (synchronous, no upload needed) ─────
+  // Fires when datasets are added OR when a new SAS file finishes analysis.
+  // Replaces DATAFILE= paths with `data/uploads/{filename}` placeholders so
+  // the preview shows updated code instantly — no waiting for an async upload.
+  useEffect(() => {
+    // Only run once analysis is complete and we have both report and datasets
+    if (phase !== 'done') return;
+    const base = reportRef.current?.fixedCode ?? '';
+    if (!base || datasetFiles.length === 0) {
+      if (datasetFiles.length === 0) setPathCorrectedCode('');
+      return;
+    }
+
+    let patched = base;
+
+    // Replace PROC IMPORT DATAFILE= paths
+    const rx = /DATAFILE\s*=\s*(["'])([^"']+)\1/gi;
+    let m: RegExpExecArray | null;
+    while ((m = rx.exec(base)) !== null) {
+      const oldPath  = m[2];
+      const fileName = oldPath.split(/[/\\]/).pop() ?? '';
+      const hit = datasetFiles.find(
+        f => f.name.toLowerCase() === fileName.toLowerCase()
+      );
+      if (hit) patched = patched.split(oldPath).join(`data/uploads/${hit.name}`);
+    }
+
+    // Prepend LIBNAME for library-qualified SET/MERGE refs
+    const deps = depAnalysisRef.current;
+    if (deps) {
+      const libnames = new Set<string>();
+      for (const dep of deps.required) {
+        if (dep.type === 'dataset' && dep.name.includes('.')) {
+          const lib     = dep.name.split('.')[0].toLowerCase();
+          const depStem = dep.name.split('.').pop()?.toLowerCase() ?? '';
+          const hit = datasetFiles.find(
+            f => f.name.replace(/\.[^.]+$/, '').toLowerCase() === depStem
+          );
+          if (hit) libnames.add(lib);
+        }
+      }
+      if (libnames.size > 0) {
+        const block = [...libnames].map(l => `libname ${l} "data/uploads";`).join('\n');
+        patched = block + '\n\n' + patched;
+      }
+    }
+
+    if (patched !== base) setPathCorrectedCode(patched);
+  // phase included so the correction re-runs whenever a new SAS file is analysed
+  // (datasetFiles may not have changed, but report.fixedCode has)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [datasetFiles, phase]);
+
+  // ── Effect 2: Async upload to get real server paths ──────────────────────
+  // After the upload succeeds the backend returns `sas_code` with absolute
+  // server paths. This overrides the placeholder display from Effect 1 and
+  // also marks `alreadyUploaded` so InputPreviewStep skips the re-upload.
+  useEffect(() => {
+    if (phase !== 'done' || !sasFile || !projectId || datasetFiles.length === 0) {
+      if (datasetFiles.length === 0) setServerPaths({});
+      return;
+    }
+
+    let cancelled = false;
+    setIsUploadingToServer(true);
+
+    projectsApi.uploadFiles(projectId, sasFile, datasetFiles)
+      .then((result) => {
+        if (cancelled) return;
+        const ids = result.dataset_file_ids ?? [];
+        const newPaths: Record<string, string> = {};
+        datasetFiles.forEach((f, i) => {
+          if (ids[i]) newPaths[f.name] = ids[i].replace(/\\/g, '/');
+        });
+        setServerPaths(newPaths);
+        // Override placeholder display with exact server-patched code
+        if (result.sas_code) setPathCorrectedCode(result.sas_code);
+      })
+      .catch(() => {
+        // Upload failed — placeholder paths from Effect 1 stay visible in preview.
+        // InputPreviewStep will attempt the upload again; if that also fails it will
+        // still navigate to translation so the user is never stuck.
+      })
+      .finally(() => { if (!cancelled) setIsUploadingToServer(false); });
+
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [datasetFiles, phase, projectId]);
 
   const resetFile = () => {
     setSasFile(null);
     setReport(null);
+    setDepAnalysis(null);
+    setServerPaths({});
+    setPathCorrectedCode('');
     setPhase('idle');
     setFileError('');
     setShowModal(false);
+  };
+
+  const copyPath = (path: string) => {
+    navigator.clipboard.writeText(path).catch(() => {});
+    setCopiedPath(path);
+    setTimeout(() => setCopiedPath(null), 2000);
   };
 
   const onDropSas = useCallback(async (acceptedFiles: File[]) => {
@@ -631,6 +814,11 @@ const UploadStep: React.FC = () => {
     const result = analyzeSAS(text);
     setReport(result);
 
+    const deps = analyzeDeps(text);
+    setDepAnalysis(deps);
+    // auto-expand dataset panel if external inputs are needed
+    if (!deps.selfContained) setDatasetEnabled(true);
+
     if (result.overallStatus === 'manual_review_required') {
       setPhase('blocked');
       setShowModal(true);
@@ -662,8 +850,58 @@ const UploadStep: React.FC = () => {
   const canContinue = phase === 'done' && !!sasFile && !datasetError;
 
   const handleContinue = () => {
+    // Compute path correction synchronously right now using current values.
+    // This is the definitive version — effects may not have fired yet (timing),
+    // but at click-time we always have report.fixedCode and datasetFiles.
+    const baseCode = report?.fixedCode ?? '';
+    let corrected = pathCorrectedCode; // use effect-computed value if available
+
+    if (baseCode && datasetFiles.length > 0) {
+      let patched = baseCode;
+
+      // Replace DATAFILE= paths
+      const rx = /DATAFILE\s*=\s*(["'])([^"']+)\1/gi;
+      let m: RegExpExecArray | null;
+      while ((m = rx.exec(baseCode)) !== null) {
+        const oldPath  = m[2];
+        const fileName = oldPath.split(/[/\\]/).pop() ?? '';
+        const hit = datasetFiles.find(
+          f => f.name.toLowerCase() === fileName.toLowerCase()
+        );
+        if (hit) patched = patched.split(oldPath).join(`data/uploads/${hit.name}`);
+      }
+
+      // Prepend LIBNAME for library-qualified SET/MERGE refs
+      if (depAnalysis) {
+        const libnames = new Set<string>();
+        for (const dep of depAnalysis.required) {
+          if (dep.type === 'dataset' && dep.name.includes('.')) {
+            const lib     = dep.name.split('.')[0].toLowerCase();
+            const depStem = dep.name.split('.').pop()?.toLowerCase() ?? '';
+            const hit = datasetFiles.find(
+              f => f.name.replace(/\.[^.]+$/, '').toLowerCase() === depStem
+            );
+            if (hit) libnames.add(lib);
+          }
+        }
+        if (libnames.size > 0) {
+          const block = [...libnames].map(l => `libname ${l} "data/uploads";`).join('\n');
+          patched = block + '\n\n' + patched;
+        }
+      }
+
+      if (patched !== baseCode) corrected = patched;
+    }
+
     navigate(`/projects/${projectId}/preview-input`, {
-      state: { sasFile, datasetFiles, datasetEnabled, validationReport: report },
+      state: {
+        sasFile,
+        datasetFiles,
+        datasetEnabled,
+        validationReport: report,
+        pathCorrectedCode: corrected || undefined,
+        alreadyUploaded: Object.keys(serverPaths).length > 0,
+      },
     });
   };
 
@@ -997,11 +1235,81 @@ const UploadStep: React.FC = () => {
           </div>
         </div>
 
-        {/* ── Optional Dataset Upload ── */}
+        {/* ── Dependency Analysis Panel ── */}
+        {depAnalysis && (phase === 'done' || phase === 'blocked') && (
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-3">
+              <FileSearch className="w-4 h-4 text-[#1f4368]" />
+              <p className="text-sm font-bold text-slate-800">Dependency Analysis</p>
+              <span className={`ml-auto text-xs font-semibold px-2.5 py-0.5 rounded-full border ${
+                depAnalysis.selfContained
+                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                  : 'bg-amber-50 text-amber-700 border-amber-200'
+              }`}>
+                {depAnalysis.selfContained ? 'Self-Contained' : `${depAnalysis.required.length} Input${depAnalysis.required.length !== 1 ? 's' : ''} Required`}
+              </span>
+            </div>
+
+            <div className="p-5">
+              {depAnalysis.selfContained ? (
+                <div className="flex items-center gap-3 p-4 bg-emerald-50 rounded-xl border border-emerald-100">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600 flex-shrink-0" />
+                  <div>
+                    <p className="text-sm font-semibold text-emerald-800">No additional files required</p>
+                    <p className="text-xs text-emerald-600 mt-0.5">Program contains all source data internally (DATALINES / DATA step).</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <p className="text-xs text-slate-500 mb-1">The following external inputs were detected. Upload them below to ensure accurate translation and execution.</p>
+                  {depAnalysis.required.map((dep, i) => {
+                    const matched = datasetFiles.find(
+                      f => f.name.replace(/\.[^.]+$/, '').toLowerCase() === dep.name.replace(/^.*\./, '').replace(/\.[^.]+$/, '').toLowerCase()
+                        || f.name.toLowerCase() === dep.name.toLowerCase()
+                    );
+                    return (
+                      <div key={i} className={`flex items-center gap-3 p-3.5 rounded-xl border ${matched ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200'}`}>
+                        {dep.type === 'dataset'
+                          ? <Database className="w-4 h-4 flex-shrink-0 text-[#1f4368]" />
+                          : <File className="w-4 h-4 flex-shrink-0 text-purple-500" />
+                        }
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-bold text-slate-800">{dep.name}</p>
+                          {dep.rawPath && <p className="text-[10px] text-slate-400 truncate">Original path: {dep.rawPath}</p>}
+                          <span className={`text-[10px] font-semibold uppercase ${dep.type === 'dataset' ? 'text-[#1f4368]' : 'text-purple-600'}`}>{dep.type}</span>
+                        </div>
+                        {matched
+                          ? <span className="flex items-center gap-1 text-xs font-semibold text-emerald-700"><PackageCheck className="w-4 h-4" /> Matched</span>
+                          : <span className="flex items-center gap-1 text-xs font-semibold text-amber-700"><PackageX className="w-4 h-4" /> Missing</span>
+                        }
+                      </div>
+                    );
+                  })}
+
+                  {/* Summary */}
+                  <div className="grid grid-cols-3 gap-3 mt-1">
+                    {[
+                      { label: 'Required',  val: depAnalysis.required.length,    color: 'text-slate-700' },
+                      { label: 'Uploaded',  val: datasetFiles.length,             color: 'text-[#1f4368]' },
+                      { label: 'Missing',   val: Math.max(0, depAnalysis.required.length - datasetFiles.length), color: 'text-amber-600' },
+                    ].map(({ label, val, color }) => (
+                      <div key={label} className="text-center bg-slate-50 rounded-lg py-2.5">
+                        <p className={`text-lg font-extrabold ${color}`}>{val}</p>
+                        <p className="text-[10px] text-slate-500 uppercase tracking-wide">{label}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── Dataset Upload ── */}
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
             <div>
-              <p className="text-sm font-bold text-slate-800">Optional Dataset Upload</p>
+              <p className="text-sm font-bold text-slate-800">Dataset Upload</p>
               <p className="text-xs text-slate-400 mt-0.5">.sas7bdat · .xpt · .csv</p>
             </div>
             <button
@@ -1019,21 +1327,64 @@ const UploadStep: React.FC = () => {
                 <input {...getDsInputProps()} />
                 <Upload className="w-7 h-7 text-slate-400 mx-auto mb-2" />
                 <p className="text-sm text-slate-500">Drop dataset files or click to browse</p>
+                <p className="text-xs text-slate-400 mt-1">.sas7bdat · .xpt · .csv accepted</p>
               </div>
+
               {datasetFiles.length > 0 && (
-                <div className="space-y-1.5">
-                  {datasetFiles.map((f, i) => (
-                    <div key={`${f.name}-${i}`} className="flex items-center gap-2.5 bg-slate-50 rounded-lg px-3 py-2">
-                      <File className="w-4 h-4 text-emerald-500 flex-shrink-0" />
-                      <span className="text-xs font-medium text-slate-700 flex-1 truncate">{f.name}</span>
-                      <span className="text-[10px] text-slate-400">{(f.size / 1024).toFixed(1)} KB</span>
-                      <button onClick={() => setDatasetFiles(prev => prev.filter((_, idx) => idx !== i))} className="text-slate-400 hover:text-red-500">
-                        <X className="w-3.5 h-3.5" />
-                      </button>
+                <div className="space-y-2">
+                  {isUploadingToServer && (
+                    <div className="flex items-center gap-2 text-xs text-[#1f4368] px-1">
+                      <div className="w-3 h-3 border-2 border-[#1f4368] border-t-transparent rounded-full animate-spin" />
+                      Uploading and resolving server paths…
                     </div>
-                  ))}
+                  )}
+                  {datasetFiles.map((f, i) => {
+                    const serverPath = serverPaths[f.name];
+                    const displayPath = serverPath ?? (isUploadingToServer ? '…' : `data/uploads/${f.name}`);
+                    const isCopied = copiedPath === displayPath;
+                    const isResolved = !!serverPath;
+                    return (
+                      <div key={`${f.name}-${i}`} className={`rounded-xl border px-4 py-3 ${isResolved ? 'bg-emerald-50 border-emerald-100' : 'bg-slate-50 border-slate-100'}`}>
+                        <div className="flex items-center gap-2.5 mb-2">
+                          <File className={`w-4 h-4 flex-shrink-0 ${isResolved ? 'text-emerald-500' : 'text-slate-400'}`} />
+                          <span className="text-xs font-semibold text-slate-800 flex-1 truncate">{f.name}</span>
+                          <span className="text-[10px] text-slate-400">{(f.size / 1024).toFixed(1)} KB</span>
+                          {isResolved && (
+                            <span className="text-[10px] font-semibold text-emerald-600 flex items-center gap-0.5">
+                              <Check className="w-3 h-3" /> Stored
+                            </span>
+                          )}
+                          <button
+                            onClick={() => setDatasetFiles(prev => prev.filter((_, idx) => idx !== i))}
+                            className="text-slate-400 hover:text-red-500 transition-colors"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        {/* Server path + copy */}
+                        <div className={`flex items-center gap-2 bg-white border rounded-lg px-3 py-1.5 ${isResolved ? 'border-emerald-200' : 'border-slate-200'}`}>
+                          <code className="text-[11px] text-slate-600 flex-1 truncate font-mono">{displayPath}</code>
+                          {displayPath !== '…' && (
+                            <button
+                              onClick={() => copyPath(displayPath)}
+                              title="Copy path"
+                              className={`flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded transition-colors flex-shrink-0 ${
+                                isCopied
+                                  ? 'bg-emerald-100 text-emerald-700'
+                                  : 'bg-slate-100 text-slate-500 hover:bg-[#eef3f8] hover:text-[#1f4368]'
+                              }`}
+                            >
+                              {isCopied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                              {isCopied ? 'Copied' : 'Copy path'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
+
               {datasetError && <p className="text-xs text-red-600">{datasetError}</p>}
             </div>
           )}
