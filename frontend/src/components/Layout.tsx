@@ -123,12 +123,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       <div className="flex-1 flex flex-col overflow-hidden">
 
         {/* Top header */}
-        <header className="h-16 bg-white dark:bg-[#1e293b] border-b border-slate-200 dark:border-slate-700 flex items-center justify-between px-6 flex-shrink-0 shadow-sm">
+        <header className="h-32 bg-white dark:bg-[#1e293b] border-b border-slate-200 dark:border-slate-700 flex items-center justify-between px-6 flex-shrink-0 shadow-sm">
           <div className="flex items-center">
-            <span className="text-xl font-black tracking-tight text-[#00a99d] dark:text-teal-400">S</span>
-            <span className="text-xl font-black tracking-tight text-[#1f4368] dark:text-slate-200">tatb</span>
-            <span className="text-xl font-black tracking-tight text-[#00a99d] dark:text-teal-400">R</span>
-            <span className="text-xl font-black tracking-tight text-[#1f4368] dark:text-slate-200">idge</span>
+            <img src="/evolves-logo.png" alt="R EvolveS" className="h-28 object-contain" />
           </div>
 
           <div className="flex items-center gap-2">
@@ -191,7 +188,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         <main className="flex-1 overflow-y-auto p-6 dark:bg-[#0f172a]">{children}</main>
 
         <footer className="flex-shrink-0 py-2.5 text-center text-[11px] text-slate-400 border-t border-slate-100 bg-white dark:bg-[#1e293b] dark:border-slate-700">
-          © 2025 StatbRidge · All rights reserved.
+          © 2025 R EvolveS · All rights reserved.
         </footer>
       </div>
     </div>

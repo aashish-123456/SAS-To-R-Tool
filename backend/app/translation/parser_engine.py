@@ -57,6 +57,9 @@ class ParseResult:
     has_proc_mixed: bool
     has_clinical_procs: bool
 
+    # Hash objects (optional, defaults to empty dict)
+    hash_objects: Dict[str, Dict] = field(default_factory=dict)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Engine
@@ -144,6 +147,9 @@ class ParserEngine:
         data_steps      = self._extract_data_steps(cleaned, ast)
         proc_steps      = self._extract_proc_steps(cleaned, ast)
         macros          = self._extract_macros(sas_code)
+        # Extract hash objects from macros
+        hash_objects    = {m['name']: {k: m.get(k) for k in ['dataset', 'key', 'data']}
+                          for m in macros if m.get('type') == 'hash_object'}
         functions       = self._detect_functions(cleaned)
         keywords        = self._detect_keywords(cleaned)
         operators       = self._detect_operators(cleaned)
@@ -165,6 +171,7 @@ class ParserEngine:
             data_steps      = data_steps,
             proc_steps      = proc_steps,
             macros          = macros,
+            hash_objects    = hash_objects,
             functions       = functions,
             keywords        = keywords,
             operators       = operators,
@@ -260,19 +267,50 @@ class ParserEngine:
 
         for m in re.finditer(r"\bproc\s+(\w+)\b", code, re.IGNORECASE):
             proc_name = m.group(1).lower()
-            if proc_name not in seen and proc_name not in ("run", "quit"):
-                seen.add(proc_name)
-                steps.append({
-                    "proc_type":      proc_name,
-                    "purpose":        self.PROC_PURPOSE_MAP.get(proc_name, "data_analysis"),
-                    "input_dataset":  "",
-                    "output_dataset": "",
-                    "variables":      [],
-                    "by_vars":        [],
-                    "class_vars":     [],
-                    "options":        {},
-                    "statistics":     [],
-                })
+            # For PROC IMPORT, allow multiple instances; for others, check seen
+            if proc_name == "import" or (proc_name not in seen and proc_name not in ("run", "quit")):
+                if proc_name != "import":
+                    seen.add(proc_name)
+
+                # Special handling for PROC IMPORT
+                if proc_name == "import":
+                    # Extract OUT= dataset name (search up to run/quit)
+                    code_section = code[m.start():m.start()+500]
+                    out_match = re.search(
+                        r"out\s*=\s*(\w+)", code_section, re.IGNORECASE
+                    )
+                    out_ds = out_match.group(1) if out_match else "imported_data"
+
+                    # Extract DATAFILE= path
+                    datafile_match = re.search(
+                        r'datafile\s*=\s*["\']?([^"\';\s]+)["\']?',
+                        code_section, re.IGNORECASE
+                    )
+                    datafile = datafile_match.group(1) if datafile_match else ""
+
+                    steps.append({
+                        "proc_type":      "import",
+                        "purpose":        "data_import",
+                        "input_dataset":  "",
+                        "output_dataset": out_ds,
+                        "variables":      [],
+                        "by_vars":        [],
+                        "class_vars":     [],
+                        "options":        {"datafile": datafile},
+                        "statistics":     [],
+                    })
+                else:
+                    steps.append({
+                        "proc_type":      proc_name,
+                        "purpose":        self.PROC_PURPOSE_MAP.get(proc_name, "data_analysis"),
+                        "input_dataset":  "",
+                        "output_dataset": "",
+                        "variables":      [],
+                        "by_vars":        [],
+                        "class_vars":     [],
+                        "options":        {},
+                        "statistics":     [],
+                    })
         return steps
 
     def _extract_macros(self, code: str) -> List[Dict]:
@@ -286,6 +324,38 @@ class ParserEngine:
         macro_vars = list(set(re.findall(r"&(\w+)", code)))
         if macro_vars:
             macros.append({"macro_variables": macro_vars})
+
+        # Extract hash objects
+        hash_re = re.compile(
+            r"declare\s+hash\s+(\w+)\s*\(\s*(?:dataset\s*:\s*['\"]?(\w+)['\"]?)?\s*\);",
+            re.IGNORECASE | re.DOTALL
+        )
+        for m in hash_re.finditer(code):
+            hash_name = m.group(1)
+            dataset = m.group(2)
+
+            # Find defineKey and defineData calls for this hash
+            hash_section = code[m.start():m.start()+1000]
+            key_match = re.search(
+                rf"{re.escape(hash_name)}\.defineKey\s*\(\s*['\"]?(\w+)['\"]?\s*\)",
+                hash_section, re.IGNORECASE
+            )
+            data_match = re.search(
+                rf"{re.escape(hash_name)}\.defineData\s*\(\s*([^)]+)\s*\)",
+                hash_section, re.IGNORECASE
+            )
+
+            key_var = key_match.group(1) if key_match else ""
+            data_vars = [v.strip().strip("'\"") for v in (data_match.group(1).split(",") if data_match else [])]
+
+            macros.append({
+                "type": "hash_object",
+                "name": hash_name,
+                "dataset": dataset,
+                "key": key_var,
+                "data": data_vars,
+            })
+
         return macros
 
     def _detect_functions(self, code: str) -> Set[str]:

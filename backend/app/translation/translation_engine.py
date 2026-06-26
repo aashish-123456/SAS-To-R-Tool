@@ -105,7 +105,7 @@ class TranslationEngine:
         try:
             from app.services.r_generator import RCodeGenerator
             gen = RCodeGenerator()
-            return gen.generate(pr.ast, pr.inline_data)
+            return gen.generate(pr.ast, pr.inline_data, hash_objects=pr.hash_objects)
         except Exception as exc:
             warnings.append(f"AST generator encountered an issue: {exc}. Using fallback.")
             return self._fallback(pr)

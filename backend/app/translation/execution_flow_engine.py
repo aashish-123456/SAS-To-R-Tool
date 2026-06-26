@@ -74,6 +74,23 @@ class ExecutionFlowEngine:
         steps: List[FlowStep] = []
         order = 1
 
+        # ── 0.  PROC IMPORT (must be first to load data!) ────────────────────
+        for proc in [p for p in pr.proc_steps if p["proc_type"] == "import"]:
+            out_ds = proc.get("output_dataset") or "imported_data"
+            steps.append(FlowStep(
+                order          = order,
+                name           = f"Import {out_ds}",
+                description    = (
+                    f"Load data from external file (PROC IMPORT) into '{out_ds}'"
+                ),
+                sas_constructs = ["PROC IMPORT", "DATAFILE", "DBMS", "OUT"],
+                inputs         = [proc.get("options", {}).get("datafile", "file")],
+                outputs        = [out_ds],
+                step_type      = "data_prep",
+                dependencies   = [],
+            ))
+            order += 1
+
         # ── 1.  Dataset ingestion / creation ──────────────────────────────────
         for ds_info in pr.data_steps:
             ds_name = ds_info.get("dataset", "dataset")

@@ -143,7 +143,7 @@ def _preinstall_r_packages() -> None:
         return
     script = r"""
 sb_lib <- file.path(Sys.getenv("USERPROFILE", unset = tempdir()),
-                    ".statbridge", "rlibs")
+                    ".evolver", "rlibs")
 if (!dir.exists(sb_lib)) dir.create(sb_lib, recursive = TRUE, showWarnings = FALSE)
 .libPaths(c(sb_lib, .libPaths()))
 options(
@@ -443,7 +443,7 @@ def execute_r_code(r_code: str) -> Dict[str, Any]:
         # is writable and install.packages() works without elevation.
         result = subprocess.run(
             [rscript, '--no-save', '--no-restore', tmp],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
             timeout=300,   # allow up to 5 min for first-time package installs
         )
         stdout = result.stdout.strip()
@@ -455,6 +455,7 @@ def execute_r_code(r_code: str) -> Dict[str, Any]:
             logs += [l for l in stderr.split('\n')
                      if l and not l.startswith('trying URL')]  # skip noisy install lines
 
+        # Only mark as success if R exits with code 0
         return {
             "status": "success" if result.returncode == 0 else "error",
             "output": stdout,
@@ -737,12 +738,12 @@ def prepare_r_code_for_execution(
     # ── 2. Build preamble ─────────────────────────────────────────────────────
 
     lines: List[str] = [
-        "# ══ StatBRidge: auto-generated execution preamble ══════════════════════",
+        "# ══ EvolveR: auto-generated execution preamble ══════════════════════",
         "",
         "# Persistent package library — survives between runs",
         "sb_lib <- file.path(Sys.getenv('USERPROFILE',",
         "                    unset = Sys.getenv('HOME', unset = tempdir())),",
-        "                    '.statbridge', 'rlibs')",
+        "                    '.evolver', 'rlibs')",
         "if (!dir.exists(sb_lib)) dir.create(sb_lib, recursive = TRUE, showWarnings = FALSE)",
         ".libPaths(c(sb_lib, .libPaths()))",
         "",
@@ -1608,7 +1609,15 @@ async def upload_files(
         def _replace_datafile(m):
             q, old_path = m.group(1), m.group(2)
             basename = old_path.replace("\\", "/").split("/")[-1].lower()
+            # Try exact match first
             new_path = file_map.get(basename)
+            if not new_path:
+                # Try normalizing dots/underscores (sdtm.ae.csv → sdtm_ae.csv)
+                basename_normalized = basename.replace(".", "_")
+                for file_key in file_map:
+                    if file_key.replace(".", "_") == basename_normalized:
+                        new_path = file_map[file_key]
+                        break
             if new_path:
                 return f"datafile={q}{new_path}{q}"
             return m.group(0)

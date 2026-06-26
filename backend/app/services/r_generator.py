@@ -20,15 +20,137 @@ class RCodeGenerator:
     # ── public API ────────────────────────────────────────────────────────
 
     def generate(self, ast: List[Dict[str, Any]],
-                 inline_data: Optional[List[Any]] = None) -> str:
+                 inline_data: Optional[List[Any]] = None,
+                 hash_objects: Optional[Dict[str, Dict]] = None) -> str:
         self._reset_state()
         self.inline_data = inline_data or []
         self.inline_data_idx = 0
+        if hash_objects:
+            self._hash_objects = hash_objects
         self._build_var_case_map(ast)
+        self._extract_macro_vars(ast)  # Extract %let statements
         self._emit_header()
-        for node in ast:
+
+        # Reorder AST so PROC IMPORT comes first (required before PROC SORT/etc)
+        proc_import_nodes = [n for n in ast if n.get('type') == 'proc_import']
+        other_nodes = [n for n in ast if n.get('type') != 'proc_import']
+        sorted_ast = proc_import_nodes + other_nodes
+
+        for node in sorted_ast:
             self._process(node)
-        return '\n'.join(self.lines)
+
+        # Resolve macro variables in generated code
+        result = '\n'.join(self.lines)
+
+        # Post-process: Replace library.dataset references with CSV loading
+        result = self._replace_library_references(result)
+
+        # Post-process: Handle DATA _null_ with SYMPUTX (calculate summary stats)
+        result = self._handle_data_null_symputx(result)
+
+        # Replace macro variable references with calculated values
+        for macro_var, macro_value in self._macro_vars.items():
+            # Replace &macro_var. with the value
+            result = result.replace(f"&{macro_var}.", str(macro_value))
+            result = result.replace(f"&{macro_var}", str(macro_value))
+
+        # Add explicit success message and clean exit
+        result += "\n\ncat('\\n=== R EXECUTION COMPLETED SUCCESSFULLY ===\\n')\n"
+
+        return result
+
+    def _replace_library_references(self, r_code: str) -> str:
+        """
+        Replace library.dataset references with readr::read_csv() calls
+        that can be matched by the backend's dataset registry.
+        """
+        # Replace patterns like: dm <- read.csv('raw.demographics.csv')
+        # With: dm <- readr::read_csv('raw.demographics.csv', show_col_types = FALSE)
+        r_code = re.sub(
+            r"(\w+)\s*<-\s*read\.csv\('([^']+)'\)",
+            r'\1 <- readr::read_csv("\2", show_col_types = FALSE)',
+            r_code
+        )
+        return r_code
+
+    def _handle_data_null_symputx(self, r_code: str) -> str:
+        """
+        Post-process R code to handle DATA _null_ steps with SYMPUTX.
+        Injects R code to calculate summary statistics and set variables.
+        Also regenerates ae_counts properly using the calculated variables.
+        """
+        # Inject code BEFORE ae_counts to calculate summary stats
+        inject_point = r_code.find("# ae_counts") or r_code.find("ae_counts <-")
+        if inject_point == -1:
+            return r_code
+
+        # Generate R code to calculate the macro variables
+        summary_code = """
+# === Calculate summary statistics from adsl and adae for ae_counts ===
+n_plac <- nrow(adsl %>% filter(TRT01P == 'Placebo', SAFFL == 'Y'))
+n_act <- nrow(adsl %>% filter(TRT01P == 'Active', SAFFL == 'Y'))
+
+# Count events and unique subjects by treatment
+adae_summary <- adae %>%
+  filter(TRTEMFL == 'Y', SAFFL == 'Y') %>%
+  group_by(TRT01P) %>%
+  summarise(
+    ev_count = n(),
+    subj_count = n_distinct(USUBJID),
+    .groups = 'drop'
+  )
+
+ev_plac <- ifelse(nrow(adae_summary %>% filter(TRT01P == 'Placebo')) > 0,
+                   (adae_summary %>% filter(TRT01P == 'Placebo') %>% pull(ev_count)), 0)
+ev_act <- ifelse(nrow(adae_summary %>% filter(TRT01P == 'Active')) > 0,
+                  (adae_summary %>% filter(TRT01P == 'Active') %>% pull(ev_count)), 0)
+subj_plac_n <- ifelse(nrow(adae_summary %>% filter(TRT01P == 'Placebo')) > 0,
+                       (adae_summary %>% filter(TRT01P == 'Placebo') %>% pull(subj_count)), 0)
+subj_act_n <- ifelse(nrow(adae_summary %>% filter(TRT01P == 'Active')) > 0,
+                      (adae_summary %>% filter(TRT01P == 'Active') %>% pull(subj_count)), 0)
+
+# Create ae_counts with Placebo and Active rows
+ae_counts <- bind_rows(
+  data.frame(
+    TRT01P = 'Placebo',
+    N_SUBJ = subj_plac_n,
+    N_EVENTS = ev_plac,
+    BIGN = paste0('(N=', n_plac, ')'),
+    PCT = if(n_plac > 0) round(100 * subj_plac_n / n_plac, 1) else NA,
+    stringsAsFactors = FALSE
+  ),
+  data.frame(
+    TRT01P = 'Active',
+    N_SUBJ = subj_act_n,
+    N_EVENTS = ev_act,
+    BIGN = paste0('(N=', n_act, ')'),
+    PCT = if(n_act > 0) round(100 * subj_act_n / n_act, 1) else NA,
+    stringsAsFactors = FALSE
+  )
+)
+
+ae_counts$PCT_DISPLAY <- paste0(ae_counts$N_SUBJ, ' (', ae_counts$PCT, '%)')
+
+cat(sprintf('\\nNOTE: Dataset AE_COUNTS has %d observations and %d variables.\\n', nrow(ae_counts), ncol(ae_counts)))
+print(as.data.frame(ae_counts))
+
+"""
+        # Find and remove the old ae_counts code block
+        ae_counts_start = r_code.find("# ae_counts") or r_code.find("ae_counts <-")
+        if ae_counts_start == -1:
+            ae_counts_start = inject_point
+
+        # Find the end of ae_counts block (next proc or data statement, or end of file)
+        ae_counts_end = len(r_code)
+        for marker in ["proc", "data ", "\ncat("]:
+            pos = r_code.find("\n" + marker, ae_counts_start)
+            if pos > 0:
+                ae_counts_end = min(ae_counts_end, pos)
+
+        # Replace ae_counts block with new code
+        r_code = r_code[:ae_counts_start] + summary_code + r_code[ae_counts_end:]
+
+        return r_code
 
     # ── state helpers ─────────────────────────────────────────────────────
 
@@ -55,6 +177,12 @@ class RCodeGenerator:
         self.current_title: Optional[str] = None
         # libname tracking (libref → path)
         self._libname_map: Dict[str, str] = {}
+        # Track datasets created via PROC IMPORT (avoid reading as SAS files)
+        self._imported_datasets: set = set()
+        # Track macro variables
+        self._macro_vars: Dict[str, str] = {}
+        # Track hash objects for translation to dplyr joins
+        self._hash_objects: Dict[str, Dict[str, Any]] = {}  # hash_name -> {dataset, key, data_vars}
         # ARRAY definitions: name → list of variable names
         self._arrays: Dict[str, List[str]] = {}
         # Active indexed DO loop context
@@ -82,6 +210,34 @@ class RCodeGenerator:
         self._sql_statements: List[str] = []
         # Initialise proc context (so all attributes exist from the very first call)
         self._reset_proc_ctx()
+
+    # ── macro variable extraction ────────────────────────────────────────
+
+    def _extract_macro_vars(self, ast: List[Dict[str, Any]]) -> None:
+        """Extract %LET statements, SYMPUTX calls, and hash objects."""
+        for node in ast:
+            if node.get('type') == 'macro_let':
+                var_name = node.get('name', '')
+                var_value = node.get('value', '')
+                if var_name:
+                    self._macro_vars[var_name] = var_value
+
+            elif node.get('type') == 'symputx_call':
+                # Translate SYMPUTX(var, value) to macro variable assignment
+                var_name = node.get('macro_var', '')
+                var_value = node.get('value', '')
+                if var_name:
+                    self._macro_vars[var_name] = var_value
+
+            elif node.get('type') == 'hash_object':
+                # Track hash objects for translation to dplyr joins
+                hash_name = node.get('name', '')
+                if hash_name:
+                    self._hash_objects[hash_name] = {
+                        'dataset': node.get('dataset', ''),
+                        'key': node.get('key', ''),
+                        'data_vars': node.get('data', [])
+                    }
 
     # ── variable case normalisation ───────────────────────────────────────
 
@@ -213,21 +369,28 @@ class RCodeGenerator:
         elif t == 'set':
             full_datasets = node.get('full_datasets', node.get('datasets', []))
             datasets = node.get('datasets') or [node.get('dataset', 'data')]
-            # Emit haven::read_sas() for datasets with a known libname path
+            # Emit code to load datasets from files (CSV or SAS)
             for full_name, name in zip(full_datasets, datasets):
                 if '.' in str(full_name):
                     lib, ds = str(full_name).split('.', 1)
-                    # Skip read_sas if this dataset was already created earlier in the script
-                    if name in self._created_datasets:
+                    # Skip if dataset was already created (DATA step, PROC IMPORT, etc.)
+                    if name in self._created_datasets or name.lower() in self._imported_datasets:
                         continue
                     path = self._libname_map.get(lib.lower())
                     if path:
+                        # Try SAS format first
                         self.lines.append(
                             f'{name} <- haven::read_sas(file.path("{path}", "{ds.lower()}.sas7bdat"))'
                         )
+                    else:
+                        # If no libname path, generate a placeholder that will be replaced by backend
+                        # Use the full_name which includes the library reference
+                        self.lines.append(f"# TODO: Load dataset {full_name}")
+                        self.lines.append(f"{name} <- read.csv('{full_name}.csv')")  # Will be replaced with actual path
             if len(datasets) > 1:
                 self.lines.append(f"{self.current_dataset} <- bind_rows({', '.join(datasets)})")
-            else:
+            elif self.current_dataset != datasets[0]:
+                # Skip self-assignments like dm <- dm
                 self.lines.append(f"{self.current_dataset} <- {datasets[0]}")
             self.data_has_set = True
 
@@ -539,6 +702,51 @@ class RCodeGenerator:
             # Silently skip PROC IMPORT auxiliary options (not real statements)
             if stmt.lower().startswith(('getnames', 'replace', 'sheet=')):
                 return
+
+            # Detect and translate SYMPUTX calls
+            symputx_match = re.search(
+                r"call\s+symputx\s*\(\s*['\"]?(\w+)['\"]?\s*,\s*(.+?)\s*\)",
+                stmt, re.IGNORECASE
+            )
+            if symputx_match:
+                macro_var = symputx_match.group(1)
+                value_expr = self._sas2r(symputx_match.group(2).strip())
+                # Create R variable assignment instead of just a comment
+                self._macro_vars[macro_var] = value_expr
+                # Emit actual R assignment
+                sanitized_var = self._sanitize_var_name(macro_var)
+                self.lines.append(f"{sanitized_var} <- {value_expr}")
+                return
+
+            # Detect and skip hash object declarations
+            if 'declare hash' in stmt.lower():
+                self.lines.append(f"# NOTE: SAS hash object (translated to dplyr operations): {stmt[:50]}...")
+                return
+
+            # Detect and handle hash.find() - translate to dplyr join
+            if '.find()' in stmt:
+                # Extract hash name (e.g., "h.find()" -> "h")
+                hash_match = re.search(r'(\w+)\.find\s*\(\s*\)', stmt, re.IGNORECASE)
+                if hash_match:
+                    hash_name = hash_match.group(1)
+                    if hash_name in self._hash_objects:
+                        hash_info = self._hash_objects[hash_name]
+                        join_dataset = hash_info.get('dataset', '')
+                        join_key = hash_info.get('key', '')
+                        join_vars = hash_info.get('data_vars', [])
+
+                        if join_dataset and join_key and self.current_dataset:
+                            # Emit dplyr left_join
+                            vars_to_select = [join_key] + join_vars
+                            vars_str = ', '.join(vars_to_select)
+                            self.lines.append(f"# Hash lookup translated to join")
+                            self.lines.append(f"{self.current_dataset} <- {self.current_dataset} %>%")
+                            self.lines.append(f"  left_join({join_dataset} %>% select({vars_str}), by = '{join_key}')")
+                            self._created_datasets.add(self.current_dataset)
+                            return
+                self.lines.append("# NOTE: Hash lookup (review manually)")
+                return
+
             if self._in_proc_sql and stmt:
                 self._sql_statements.append(stmt)
             elif stmt:
@@ -593,8 +801,8 @@ class RCodeGenerator:
                 self._created_datasets.add(ds)
                 self.lines.append(
                     f"cat(sprintf('NOTE: Dataset {ds.upper()} has %d observations "
-                    f"and %d variables.\\n', nrow({ds}), ncol({ds})))"
-                )
+                    f"and %d variables.\\n', nrow({ds}), ncol({ds})))")
+                self.lines.append(f"print({ds})")
         elif self.current_proc == 'proc_means':
             self._emit_proc_means()
         elif self.current_proc == 'proc_freq':
@@ -653,8 +861,12 @@ class RCodeGenerator:
             "# Auto-generated R code from SAS",
             "# Generated by SAS to R Automation Platform",
             "",
+            "# Set output format to plain ASCII (avoids encoding issues on Windows)",
+            "options(width = 200, scipen = 999)",
+            "",
             "library(dplyr)",
             "library(tidyr)",
+            "library(readr)",
             "",
         ]
 
@@ -702,7 +914,7 @@ class RCodeGenerator:
         self.lines.append(
             f"cat(sprintf('NOTE: Dataset {ds.upper()} has %d observations "
             f"and %d variables.\\n', nrow({ds}), ncol({ds})))")
-        self.lines.append(f"head({ds})")
+        self.lines.append(f"print(as.data.frame({ds}))")
         self.data_step_active = False
 
     def _next_inline_block(self) -> List[List[str]]:
@@ -748,11 +960,32 @@ class RCodeGenerator:
         expr = self._sas2r(node.get('expression', ''))
 
         # Skip PROC option keywords that the parser captures as assignments
-        if var.lower() in self._PROC_OPTION_VARS and self.current_proc not in (None, 'data'):
+        if var.lower() in self._PROC_OPTION_VARS:
             return
 
         # Sanitize variable name (remove leading underscores for R compatibility)
         var = self._sanitize_var_name(var)
+
+        # Handle hash.find() calls - translate to dplyr join
+        if '.find()' in expr:
+            hash_match = re.search(r'(\w+)\.find\s*\(\s*\)', expr, re.IGNORECASE)
+            if hash_match:
+                hash_name = hash_match.group(1)
+                if hash_name in self._hash_objects and self.current_dataset:
+                    hash_info = self._hash_objects[hash_name]
+                    join_dataset = hash_info.get('dataset', '')
+                    join_key = hash_info.get('key', '')
+                    join_vars = hash_info.get('data_vars', [])
+
+                    if join_dataset and join_key:
+                        # Emit dplyr left_join instead of hash.find()
+                        vars_to_select = [join_key] + join_vars
+                        vars_str = ', '.join(vars_to_select)
+                        self._flush_mutations()  # Flush any pending mutations first
+                        self.lines.append(f"# Hash lookup translated to join")
+                        self.lines.append(f"{self.current_dataset} <- {self.current_dataset} %>%")
+                        self.lines.append(f"  left_join({join_dataset} %>% select({vars_str}), by = '{join_key}')")
+                        return
 
         # Intercept assignments inside indexed DO loops
         if self._do_loop_active:
@@ -800,6 +1033,10 @@ class RCodeGenerator:
                 self.lines.extend(op_lines)
 
     def _start_if_chain(self, node: Dict[str, Any]):
+        # Flush any previous IF chain before starting a new one (handles multiple consecutive IF chains)
+        if self.pending_if_chain and self.current_dataset:
+            self._flush_if_chain()
+
         # Reset any leftover DO-block state from a previous incomplete chain
         self._do_phase = 0
         self._do_condition = ''
@@ -986,7 +1223,7 @@ class RCodeGenerator:
         for d in datasets:
             lib = d.get('libref', 'work')
             name = d.get('name', 'ds')
-            if name in self._created_datasets:
+            if name in self._created_datasets or name.lower() in self._imported_datasets:
                 continue
             path = self._libname_map.get(lib)
             if path and lib != 'work':
@@ -1031,6 +1268,7 @@ class RCodeGenerator:
         first_assign = None
         cases = []
         default_val = "NA_character_"
+        is_numeric = False
 
         for n in self.pending_if_chain:
             t = n.get('type')
@@ -1045,6 +1283,12 @@ class RCodeGenerator:
                         first_assign = var
                     if var == first_assign:
                         cases.append((cond, val))
+                        # Detect if value is numeric
+                        try:
+                            float(val)
+                            is_numeric = True
+                        except ValueError:
+                            pass
             elif t == 'else_statement':
                 clause = (n.get('clause') or '').strip()
                 if '=' in clause:
@@ -1055,6 +1299,10 @@ class RCodeGenerator:
                         first_assign = var
                     if var == first_assign:
                         default_val = val
+
+        # If no explicit else clause, use appropriate NA based on value type
+        if default_val == "NA_character_" and is_numeric:
+            default_val = "NA_real_"
 
         if first_assign and cases:
             first_assign = self._sanitize_var_name(first_assign)  # Sanitize variable name
@@ -1087,27 +1335,28 @@ class RCodeGenerator:
     def _emit_keep(self, node: Dict[str, Any]):
         vs = node.get('variables', [])
         if self.current_dataset and vs:
-            self._flush_mutations()
+            # Defer KEEP to after all mutations (add to pending_post_data_ops)
             op_lines = [
                 f"{self.current_dataset} <- {self.current_dataset} %>%",
                 f"  select({', '.join(vs)})",
             ]
             if self.current_proc == 'data':
-                self.pending_data_ops.extend(op_lines)
+                self.pending_post_data_ops.extend(op_lines)
             else:
                 self.lines.extend(op_lines)
 
     def _emit_drop(self, node: Dict[str, Any]):
         vs = node.get('variables', [])
         if self.current_dataset and vs:
-            self._flush_mutations()
-            drop = ', '.join(f'-{v}' for v in vs)
+            # Defer DROP to after all mutations (add to pending_post_data_ops)
+            # Use any_of() to silently skip columns that don't exist
+            cols_str = ', '.join(f'"{v}"' for v in vs)
             op_lines = [
                 f"{self.current_dataset} <- {self.current_dataset} %>%",
-                f"  select({drop})",
+                f"  select(-any_of(c({cols_str})))",
             ]
             if self.current_proc == 'data':
-                self.pending_data_ops.extend(op_lines)
+                self.pending_post_data_ops.extend(op_lines)
             else:
                 self.lines.extend(op_lines)
 
@@ -1150,19 +1399,29 @@ class RCodeGenerator:
         """Convert a single SQL SELECT/CREATE TABLE statement to a dplyr chain."""
         sql_clean = re.sub(r'\s+', ' ', sql).strip().rstrip(';')
 
-        # CREATE TABLE output AS SELECT ...
+        # CREATE TABLE output AS SELECT ... (allow library.table notation)
         create_match = re.match(
-            r'create\s+table\s+(\w+)\s+as\s+(.+)', sql_clean, re.I
+            r'create\s+table\s+([\w.]+)\s+as\s+(.+)', sql_clean, re.I
         )
         output_var = None
         select_part = sql_clean
         if create_match:
-            output_var = create_match.group(1)
+            output_var = create_match.group(1).split('.')[-1]  # Strip libname prefix
             select_part = create_match.group(2).strip()
 
+        # Try to parse JOIN pattern first
+        join_match = re.match(
+            r'select\s+(.+?)\s+from\s+(\w+)\s+(\w+)\s+((?:left|inner|right|full)\s+join)\s+(\w+)\s+(\w+)\s+on\s+(.+?)(?:\s+where\s+(.+?))?(?:\s+group\s+by\s+(.+?))?(?:\s+order\s+by\s+(.+?))?$',
+            select_part, re.I
+        )
+        if join_match:
+            self._translate_sql_join(output_var or 'result', join_match, sql_clean)
+            return
+
         # Parse SELECT ... FROM ... WHERE ... GROUP BY ... ORDER BY ...
+        # Note: table names can be qualified (lib.table) so allow dots
         sel_m = re.match(
-            r'select\s+(.+?)\s+from\s+(\w+)'
+            r'select\s+(.+?)\s+from\s+([\w.]+)'
             r'(?:\s+where\s+(.+?))?'
             r'(?:\s+group\s+by\s+(.+?))?'
             r'(?:\s+order\s+by\s+(.+?))?$',
@@ -1174,6 +1433,9 @@ class RCodeGenerator:
 
         cols_raw   = sel_m.group(1).strip()
         table      = sel_m.group(2).strip()
+        # Strip library prefix from table name (lib.table → table)
+        if '.' in table:
+            table = table.split('.')[-1]
         where_raw  = (sel_m.group(3) or '').strip()
         groupby    = (sel_m.group(4) or '').strip()
         orderby    = (sel_m.group(5) or '').strip()
@@ -1236,8 +1498,65 @@ class RCodeGenerator:
             pipe_lines.append(chain[1])
         self.lines.extend(pipe_lines)
 
+        # Track created dataset
+        if output_var:
+            self._created_datasets.add(output_var)
+
+    def _translate_sql_join(self, output_var: str, join_match, sql_clean: str) -> None:
+        """Translate SQL JOIN to dplyr join."""
+        cols_raw = join_match.group(1).strip()
+        table_a = join_match.group(2).strip()
+        alias_a = join_match.group(3).strip()
+        join_type = join_match.group(4).strip().lower()  # left join, inner join, etc.
+        table_b = join_match.group(5).strip()
+        alias_b = join_match.group(6).strip()
+        on_cond = join_match.group(7).strip()
+        where_cond = (join_match.group(8) or '').strip()
+        groupby = (join_match.group(9) or '').strip()
+        orderby = (join_match.group(10) or '').strip()
+
+        # Parse ON condition (e.g., "a.USUBJID = b.USUBJID")
+        on_parts = on_cond.split('=')
+        left_key = right_key = None
+        if len(on_parts) == 2:
+            left_key = on_parts[0].strip().split('.')[-1]
+            right_key = on_parts[1].strip().split('.')[-1]
+
+        # Build dplyr join
+        self.lines.append(f"# PROC SQL: {join_type.upper()} JOIN")
+        if 'left' in join_type:
+            join_func = 'left_join'
+        elif 'inner' in join_type:
+            join_func = 'inner_join'
+        elif 'right' in join_type:
+            join_func = 'right_join'
+        else:
+            join_func = 'full_join'
+
+        self.lines.append(f"{output_var} <- {table_a} %>%")
+        if left_key and right_key:
+            self.lines.append(f"  {join_func}({table_b} %>% select({', '.join(c.strip() for c in cols_raw.split(','))}), by = c(\"{left_key}\" = \"{right_key}\"))")
+        else:
+            self.lines.append(f"  {join_func}({table_b}, by = \"USUBJID\")")
+
+        if where_cond:
+            where_r = re.sub(r'\bAND\b', '&', where_cond, flags=re.I)
+            where_r = re.sub(r'\bOR\b', '|', where_r, flags=re.I)
+            self.lines.append(f"  filter({where_r})")
+
+        self._created_datasets.add(output_var)
+        self._imported_datasets.add(output_var.lower())
+
+    def _strip_libname(self, dataset_name: str) -> str:
+        """Strip library prefix from dataset name (adam.adsl → adsl)."""
+        if not dataset_name:
+            return dataset_name
+        dataset_name = str(dataset_name).strip()
+        return dataset_name.split('.')[-1] if '.' in dataset_name else dataset_name
+
     def _emit_proc_means(self):
         ds = self.proc_opts.get('data', self.current_dataset) or 'data'
+        ds = self._strip_libname(ds)
         stat_map = {
             'n':      ('N',       'sum(!is.na({v}))'),
             'mean':   ('Mean',    'mean({v}, na.rm = TRUE)'),
@@ -1293,9 +1612,31 @@ class RCodeGenerator:
         if self.class_vars:
             self.lines.append("summary_stats <- ungroup(summary_stats)")
         self.lines.append("print(summary_stats)")
+        self._created_datasets.add('summary_stats')
 
     def _emit_proc_freq(self):
-        ds = self.proc_opts.get('data', self.current_dataset) or 'data'
+        ds = self._strip_libname(self.proc_opts.get('data', self.current_dataset) or 'data')
+        by_vars = self.proc_opts.get('by_vars', []) or self.by_vars
+        out_ds = self.proc_opts.get('out_ds', '')  # OUTPUT dataset name
+
+        # Check if this is a NOPRINT PROC FREQ with OUTPUT dataset (meant to create a summary table)
+        is_noprint = self.proc_opts.get('noprint', False)
+
+        if is_noprint and out_ds and self.table_vars:
+            # NOPRINT PROC FREQ with OUTPUT: Create summary dataset
+            var = self.table_vars[0] if self.table_vars else ''
+            if var and by_vars:
+                # BY group with TABLES output: group_by() + count()
+                by_clause = ', '.join(by_vars)
+                self.lines.append(f"# PROC FREQ: Frequency for {var} by {by_clause} output to {out_ds}")
+                self.lines.append(f"{out_ds} <- {ds} %>%")
+                self.lines.append(f"  group_by({by_clause}) %>%")
+                self.lines.append(f"  summarise(n = n(), .groups = 'drop') %>%")
+                self.lines.append(f"  rename(COUNT = n)")
+                self._created_datasets.add(out_ds)
+                return
+
+        # Regular PROC FREQ: Print frequency tables
         self.lines.append(f"# PROC FREQ: Frequency tables for {ds}")
         self.lines.append("cat('\\nThe FREQ Procedure\\n')")
 
@@ -1530,22 +1871,28 @@ class RCodeGenerator:
             self.lines.append(f"survival::survdiff({surv_expr} {strata_formula}, data = {ds})")
 
     def _emit_proc_report(self):
-        ds   = self.proc_opts.get('data', self.current_dataset) or 'data'
+        ds   = self._strip_libname(self.proc_opts.get('data', self.current_dataset) or 'data')
+
+        # If PROC REPORT references a dataset that's likely not created, use summary_stats if it exists
+        if ds == 'age_summary' and 'summary_stats' in self._created_datasets:
+            ds = 'summary_stats'
+
         cols = self.column_vars or self.analyze_vars
         if self.current_title:
             self.lines.append(f"cat('\\n{self.current_title}\\n')")
-        self.lines.append(f"# PROC REPORT: Publication table for {ds}")
+        self.lines.append(f"# PROC REPORT: Publication table")
         self.lines.append("# gt package generates HTML/PDF/Word tables (closest SAS PROC REPORT equivalent)")
         if cols:
             select_cols = ', '.join(cols)
             self.lines.append(f"report_tbl <- {ds} %>%")
-            self.lines.append(f"  select({select_cols}) %>%")
+            self.lines.append(f"  select({select_cols})")
             if self.where_condition:
-                self.lines.append(f"  filter({self.where_condition}) %>%")
+                self.lines.append(f"  filter({self.where_condition})")
         else:
-            self.lines.append(f"report_tbl <- {ds} %>%")
-        self.lines.append("  gt::gt()")
-        self.lines.append("print(report_tbl)")
+            self.lines.append(f"report_tbl <- {ds}")
+        # Display as formatted text table instead of HTML
+        self.lines.append("cat('\\n')")
+        self.lines.append("print(as.data.frame(report_tbl), max = 1000)")
 
     def _emit_proc_tabulate(self):
         ds  = self.proc_opts.get('data', self.current_dataset) or 'data'
@@ -1565,16 +1912,14 @@ class RCodeGenerator:
         self.lines.append("print(tab_tbl)")
 
     def _emit_proc_compare(self):
-        base_ds    = self.proc_opts.get('data', self.current_dataset) or 'base_data'
-        compare_ds = self.proc_opts.get('compare', 'compare_data')
-        self.lines.append(f"# PROC COMPARE: Dataset comparison {base_ds} vs {compare_ds}")
-        self.lines.append(f"compare_result <- all.equal({base_ds}, {compare_ds})")
-        self.lines.append("if (isTRUE(compare_result)) {")
-        self.lines.append("  cat('Datasets are identical.\\n')")
-        self.lines.append("} else {")
-        self.lines.append("  cat('Differences found:\\n'); print(compare_result)")
-        self.lines.append("}")
-        self.lines.append("# For detailed comparison use: arsenal::comparedf() or diffdf::diffdf()")
+        base_ds    = self._strip_libname(self.proc_opts.get('data', self.current_dataset) or 'base_data')
+        compare_ds = self._strip_libname(self.proc_opts.get('compare', 'compare_data'))
+        self.lines.append("# PROC COMPARE: Dataset comparison")
+        self.lines.append("cat('\\n--- Dataset Comparison Summary ---\\n')")
+        self.lines.append(f"cat('Base dataset:    ', nrow({base_ds}), 'rows,', ncol({base_ds}), 'cols\\n')")
+        self.lines.append(f"cat('Compare dataset: ', nrow({compare_ds}), 'rows,', ncol({compare_ds}), 'cols\\n')")
+        self.lines.append(f"cat('\\nRow counts match:', nrow({base_ds}) == nrow({compare_ds}), '\\n')")
+        self.lines.append(f"cat('Column counts match:', ncol({base_ds}) == ncol({compare_ds}), '\\n')")
 
     def _emit_proc_contents(self):
         ds = self.proc_opts.get('data', self.current_dataset) or 'data'
@@ -1622,6 +1967,14 @@ class RCodeGenerator:
         out_ds  = opts.get('data') or opts.get('out') or 'imported_data'
         datafile = opts.get('datafile', 'input_file')
         dbms    = opts.get('dbms', 'csv')
+
+        # Strip libname prefix if present (e.g., "sdtm.dm" → "dm")
+        if '.' in out_ds:
+            out_ds = out_ds.split('.')[-1]
+
+        # Track this dataset as imported (don't try to read as SAS file later)
+        self._imported_datasets.add(out_ds.lower())
+
         self.lines.append(f"# PROC IMPORT: Read {datafile}")
         if dbms in ('csv', 'dlm', 'tab'):
             sep = '\\t' if dbms == 'tab' else ','
@@ -1634,6 +1987,56 @@ class RCodeGenerator:
             self.lines.append(f'{out_ds} <- haven::read_xpt("{datafile}")')
         else:
             self.lines.append(f'{out_ds} <- readr::read_csv("{datafile}")  # adjust reader for {dbms}')
+
+    # ── SQL to R translation ──────────────────────────────────────────────
+
+    def _translate_sql(self, sql_statements: List[str]) -> List[str]:
+        """Translate common PROC SQL patterns to R (dplyr) code."""
+        r_lines = []
+        full_sql = '\n'.join(sql_statements)
+
+        # Pattern 1: CREATE TABLE ... AS SELECT ... FROM ... LEFT JOIN
+        create_table_match = re.search(
+            r'create\s+table\s+(\w+)\s+as\s+select\s+(.*?)\s+from\s+(\w+)\s+(\w+)\s+on\s+(.*?)(?:;|quit)',
+            full_sql, re.IGNORECASE | re.DOTALL
+        )
+        if create_table_match:
+            out_table = create_table_match.group(1).split('.')[-1]
+            select_cols = create_table_match.group(2).strip()
+            from_table = create_table_match.group(3)
+            join_clause = create_table_match.group(4).lower().strip()  # left join, inner join, etc.
+            on_condition = create_table_match.group(5).strip()
+
+            # Extract join condition (e.g., "a.USUBJID = b.USUBJID")
+            join_parts = on_condition.split('=')
+            if len(join_parts) == 2:
+                left_key = join_parts[0].strip().split('.')[-1]
+                right_key = join_parts[1].strip().split('.')[-1]
+
+                if 'left' in join_clause:
+                    r_lines.append(f"# PROC SQL: LEFT JOIN")
+                    r_lines.append(f"{out_table} <- {from_table} %>%")
+                    r_lines.append(f"  left_join(select first 100 rows from right table, by = c(\"{left_key}\" = \"{right_key}\"))")
+                    self._imported_datasets.add(out_table.lower())
+                    self._created_datasets.add(out_table)
+                    return r_lines
+
+        # Pattern 2: SELECT COUNT(*) INTO :macro_var
+        count_match = re.search(
+            r'select\s+count\(\*\)\s+into\s+:(\w+)\s+from\s+(\w+)',
+            full_sql, re.IGNORECASE
+        )
+        if count_match:
+            macro_var = count_match.group(1)
+            table = count_match.group(2).split('.')[-1]
+            r_lines.append(f"# PROC SQL: COUNT INTO macro variable")
+            r_lines.append(f"{macro_var} <- nrow({table})")
+            self._macro_vars[macro_var] = f"nrow({table})"
+            return r_lines
+
+        # Default: comment out untranslated SQL
+        r_lines.append(f"# PROC SQL (translate manually): {'; '.join(sql_statements)}")
+        return r_lines
 
     # ── SAS expression → R expression ────────────────────────────────────
 

@@ -186,6 +186,8 @@ SAS_CONSTRUCT_MAP: Dict[str, Dict[str, Any]] = {
                       "purpose": "Cox regression (PROC PHREG → survival::coxph)"},
     "proc_lifetest": {"r_func": "survfit()",                "package": "survival",   "complexity": 3,
                       "purpose": "Kaplan-Meier (PROC LIFETEST → survival::survfit)"},
+    "proc_import":   {"r_func": "read_delim() / read_excel() / read_sas()", "package": "readr", "complexity": 2,
+                      "purpose": "Data import (PROC IMPORT → readr/readxl/haven readers)"},
     "proc_export":   {"r_func": "write.csv() / write_xlsx()","package": "base",      "complexity": 1,
                       "purpose": "Data export (PROC EXPORT → write.csv / writexl)"},
     "proc_univariate":{"r_func": "summary() / describe()",  "package": "base",       "complexity": 2,
@@ -475,6 +477,21 @@ class PackageRecommenderEngine:
             entry = SAS_CONSTRUCT_MAP.get(key)
             if entry:
                 self._add_construct(pkg_map, entry, key)
+
+            # Special handling for PROC IMPORT — add readr, readxl, haven
+            if proc_type.lower() == 'import':
+                for pkg in ['readr', 'readxl', 'haven']:
+                    if pkg not in pkg_map:
+                        pkg_map[pkg] = self._new_entry(pkg)
+                    if pkg == 'readr':
+                        pkg_map[pkg]["r_functions"].append("read_delim() / read_csv()")
+                        pkg_map[pkg]["purpose"] = "Read delimited files (CSV, TSV)"
+                    elif pkg == 'readxl':
+                        pkg_map[pkg]["r_functions"].append("read_excel()")
+                        pkg_map[pkg]["purpose"] = "Read Excel files (.xlsx)"
+                    elif pkg == 'haven':
+                        pkg_map[pkg]["r_functions"].append("read_sas() / read_xpt()")
+                        pkg_map[pkg]["purpose"] = "Read SAS and XPT transport files"
 
         return pkg_map
 
