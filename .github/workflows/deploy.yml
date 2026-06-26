@@ -1,0 +1,53 @@
+name: Deploy to Render (Clear Cache)
+
+on:
+  push:
+    branches:
+      - SAS-To-R-Codes-new
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Clean frontend cache
+        run: |
+          cd frontend
+          rm -rf node_modules dist .vite
+          npm ci --prefer-offline
+          npm run build
+          cd ..
+
+      - name: Create deployment marker
+        run: |
+          echo "DEPLOYMENT_TIME=$(date -u +%s)" >> $GITHUB_ENV
+          echo "Force rebuild: $(date)" > DEPLOY_TIMESTAMP.txt
+
+      - name: Commit marker
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add DEPLOY_TIMESTAMP.txt
+          git commit -m "chore: force rebuild at $(date)" || true
+          git push
+
+      - name: Trigger Render deployment
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          if [ -n "$RENDER_DEPLOY_HOOK" ]; then
+            curl -X POST "$RENDER_DEPLOY_HOOK"
+          else
+            echo "RENDER_DEPLOY_HOOK not configured. Configure it in GitHub Secrets."
+          fi
