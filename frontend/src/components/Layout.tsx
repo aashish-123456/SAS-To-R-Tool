@@ -39,10 +39,10 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       {/* ── Sidebar ── */}
       <aside className="w-60 bg-[#1f4368] border-r border-blue-900/40 flex flex-col flex-shrink-0">
 
-        {/* Zuality Logo */}
-        <div className="h-28 border-b border-blue-900/40 flex-shrink-0">
-          <Link to="/dashboard" className="block w-full h-full">
-            <img src="/zuality-logo.png" alt="Zuality" className="w-full h-full object-contain" />
+        {/* R EvolveS Logo */}
+        <div className="h-24 border-b border-blue-900/40 flex-shrink-0 flex items-center justify-center py-2">
+          <Link to="/dashboard" className="block w-full h-full flex items-center justify-center">
+            <img src="/image.png" alt="R EvolveS" className="h-20 object-contain" />
           </Link>
         </div>
 
@@ -123,10 +123,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       <div className="flex-1 flex flex-col overflow-hidden">
 
         {/* Top header */}
-        <header className="h-32 bg-white dark:bg-[#1e293b] border-b border-slate-200 dark:border-slate-700 flex items-center justify-between px-6 flex-shrink-0 shadow-sm">
-          <div className="flex items-center">
-            <img src="/evolves-logo.png" alt="R EvolveS" className="h-28 object-contain" />
-          </div>
+        <header className="h-20 bg-white dark:bg-[#1e293b] border-b border-slate-200 dark:border-slate-700 flex items-center justify-end px-6 flex-shrink-0 shadow-sm">
 
           <div className="flex items-center gap-2">
             {/* Help */}
