@@ -22,7 +22,12 @@ const steps = [
 const ProjectWorkflow: React.FC = () => {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
-  const { data: project } = useQuery({ queryKey: ['project', projectId], queryFn: () => projectsApi.getById(projectId!), enabled: !!projectId });
+  const { data: project } = useQuery({
+    queryKey: ['project', projectId],
+    queryFn: () => projectsApi.getById(projectId!),
+    enabled: !!projectId,
+    retry: 0  // Don't retry if project doesn't exist yet
+  });
 
   const getCurrentStepIndex = () => {
     const path = window.location.pathname;

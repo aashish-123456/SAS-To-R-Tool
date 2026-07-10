@@ -2,11 +2,12 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useDropzone } from 'react-dropzone';
 import { projectsApi } from '@/services/api';
+import { DependencyAnalyzer } from '@/components/DependencyAnalyzer';
 import {
   Upload, File, X, CheckCircle2, AlertTriangle, AlertCircle,
   ChevronDown, ChevronRight, Wrench, ShieldAlert, ArrowRight,
-  Cpu, ClipboardList, Zap, Info, Copy, Check, Database,
-  FileSearch, PackageCheck, PackageX,
+  Cpu, ClipboardList, Zap, Info, Copy, Check,
+  Shield, TrendingUp,
 } from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────────
@@ -659,7 +660,14 @@ const UploadStep: React.FC = () => {
   const [datasetEnabled, setDatasetEnabled] = useState(false);
   const [datasetError, setDatasetError] = useState('');
   const [fileError, setFileError] = useState('');
+  const [autoFixResults, setAutoFixResults] = useState<any>(null);
+  const [appliedTier2Fixes, setAppliedTier2Fixes] = useState<Set<number>>(new Set());
+  const [aiAnalysis, setAiAnalysis] = useState<any>(null);
+  const [enhancedDepAnalysis, setEnhancedDepAnalysis] = useState<any>(null);
+  const [depIntelligenceV2, setDepIntelligenceV2] = useState<any>(null);
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
+  const [datasetQualifications, setDatasetQualifications] = useState<Record<string, any>>({});
+  const [expandedQualSection, setExpandedQualSection] = useState<string | null>(null);
 
   // Server-side paths returned after upload
   const [serverPaths, setServerPaths]             = useState<Record<string, string>>({});
@@ -727,32 +735,105 @@ const UploadStep: React.FC = () => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [datasetFiles, phase]);
 
-  // ── Effect 2: Async upload to get real server paths ──────────────────────
-  // After the upload succeeds the backend returns `sas_code` with absolute
-  // server paths. This overrides the placeholder display from Effect 1 and
-  // also marks `alreadyUploaded` so InputPreviewStep skips the re-upload.
+  // ── Effect 1.5: Fetch AI analysis (auto-fix + comprehensive code analysis) ──
+  // After file is analyzed, call backend for auto-fix and comprehensive analysis
   useEffect(() => {
-    if (phase !== 'done' || !sasFile || !projectId || datasetFiles.length === 0) {
-      if (datasetFiles.length === 0) setServerPaths({});
+    if (!projectId || phase !== 'done' || !sasFile || isUploadingToServer) {
+      setAutoFixResults(null);
+      setAiAnalysis(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const fetchAIResults = async () => {
+      try {
+        // Fetch auto-fix results
+        const autoFixResponse = await fetch(`/api/v1/projects/${projectId}/analyze-autofix`, {
+          method: 'POST',
+        });
+        if (!cancelled && autoFixResponse.ok) {
+          const autoFixResults = await autoFixResponse.json();
+          setAutoFixResults(autoFixResults);
+        }
+
+        // Fetch comprehensive code analysis
+        const analysisResponse = await fetch(`/api/v1/projects/${projectId}/analyze-code`, {
+          method: 'POST',
+        });
+        if (!cancelled && analysisResponse.ok) {
+          const analysisResults = await analysisResponse.json();
+          console.log('[UploadStep] Analysis response:', analysisResults);
+          setAiAnalysis(analysisResults);
+          // Extract enhanced dependency analysis if available
+          if (analysisResults.enhanced_dependency_analysis) {
+            console.log('[UploadStep] Enhanced dependency analysis found:', analysisResults.enhanced_dependency_analysis);
+            setEnhancedDepAnalysis(analysisResults.enhanced_dependency_analysis);
+          } else {
+            console.warn('[UploadStep] No enhanced_dependency_analysis in response');
+          }
+          // Extract v2 dependency intelligence if available
+          if (analysisResults.dependency_intelligence_v2) {
+            console.log('[UploadStep] Dependency Intelligence v2 found:', analysisResults.dependency_intelligence_v2);
+            setDepIntelligenceV2(analysisResults.dependency_intelligence_v2);
+          }
+        }
+
+      } catch (err) {
+        console.error('Failed to fetch AI analysis results:', err);
+      }
+    };
+
+    fetchAIResults();
+    return () => { cancelled = true; };
+  // Re-run analysis when serverPaths change (datasets uploaded)
+  }, [projectId, phase, isUploadingToServer, serverPaths]);
+
+  // ── Effect 2: Async upload to server (SAS file + optional datasets) ────────
+  // Upload SAS file to server immediately after file is analyzed
+  // This ensures sas_code is stored for analyze-autofix and analyze-code endpoints
+  useEffect(() => {
+    // Upload happens when:
+    // - phase is 'done' (file analyzed locally)
+    // - projectId exists
+    // - sasFile exists
+    // Datasets are optional - upload SAS file alone if no datasets
+    if (phase !== 'done' || !sasFile || !projectId) {
       return;
     }
 
     let cancelled = false;
     setIsUploadingToServer(true);
 
-    projectsApi.uploadFiles(projectId, sasFile, datasetFiles)
+    console.log('[Effect 2] Starting file upload to server', {
+      projectId,
+      sasFile: sasFile.name,
+      datasetCount: datasetFiles.length
+    });
+
+    projectsApi.uploadFiles(projectId, sasFile, datasetFiles.length > 0 ? datasetFiles : undefined)
       .then((result) => {
         if (cancelled) return;
+        console.log('[Effect 2] Upload successful', result);
+
         const ids = result.dataset_file_ids ?? [];
         const newPaths: Record<string, string> = {};
         datasetFiles.forEach((f, i) => {
-          if (ids[i]) newPaths[f.name] = ids[i].replace(/\\/g, '/');
+          if (ids[i]) {
+            const path = ids[i].replace(/\\/g, '/');
+            newPaths[f.name] = path;
+            console.log(`[Effect 2] Set serverPath: ${f.name} → ${path}`);
+          } else {
+            console.warn(`[Effect 2] No path for dataset ${i} (${f.name})`);
+          }
         });
+        console.log('[Effect 2] Final serverPaths:', newPaths);
         setServerPaths(newPaths);
         // Override placeholder display with exact server-patched code
         if (result.sas_code) setPathCorrectedCode(result.sas_code);
       })
-      .catch(() => {
+      .catch((err) => {
+        console.error('[Effect 2] Upload failed', err);
         // Upload failed — placeholder paths from Effect 1 stay visible in preview.
         // InputPreviewStep will attempt the upload again; if that also fails it will
         // still navigate to translation so the user is never stuck.
@@ -760,8 +841,97 @@ const UploadStep: React.FC = () => {
       .finally(() => { if (!cancelled) setIsUploadingToServer(false); });
 
     return () => { cancelled = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [datasetFiles, phase, projectId]);
+  }, [sasFile, phase, projectId, datasetFiles]);
+
+  // ── Effect 3: Dataset Qualification (AI Intelligence) ─────────────────────────
+  // When files are uploaded and serverPaths are populated, qualify each dataset
+  useEffect(() => {
+    console.log('[Effect 3] Checking qualification trigger:', {
+      projectId,
+      phase,
+      datasetFiles: datasetFiles.length,
+      isUploadingToServer,
+      serverPaths: Object.keys(serverPaths).length
+    });
+
+    if (!projectId || phase !== 'done' || datasetFiles.length === 0 || isUploadingToServer) {
+      console.log('[Effect 3] Early return - conditions not met');
+      return;
+    }
+
+    // Only run if we have serverPaths (files uploaded successfully)
+    const hasUploadedFiles = datasetFiles.some(f => serverPaths[f.name]);
+    console.log('[Effect 3] hasUploadedFiles:', hasUploadedFiles, {
+      files: datasetFiles.map(f => ({ name: f.name, inServerPaths: !!serverPaths[f.name] }))
+    });
+
+    if (!hasUploadedFiles) {
+      console.log('[Effect 3] Skipping - no files uploaded yet');
+      return;
+    }
+
+    let cancelled = false;
+
+    const qualifyDatasets = async () => {
+      console.log('[Effect 3] Starting qualification...');
+      try {
+        const qualifications: Record<string, any> = {};
+
+        for (const file of datasetFiles) {
+          // Only qualify if not already done
+          if (datasetQualifications[file.name]) {
+            console.log(`[Effect 3] Skipping ${file.name} - already qualified`);
+            qualifications[file.name] = datasetQualifications[file.name];
+            continue;
+          }
+
+          try {
+            // Use serverPath if available (after upload), otherwise skip
+            const serverPath = serverPaths[file.name];
+            if (!serverPath) {
+              console.log(`[Effect 3] Skipping ${file.name} - not yet uploaded`);
+              continue;
+            }
+
+            console.log(`[Effect 3] Calling qualify-dataset for ${file.name} at ${serverPath}`);
+
+            const response = await fetch(
+              `/api/v1/projects/${projectId}/qualify-dataset?file_path=${encodeURIComponent(serverPath)}&dataset_name=${encodeURIComponent(file.name)}`,
+              { method: 'POST' }
+            );
+
+            console.log(`[Effect 3] Response status: ${response.status}`);
+
+            if (response.ok) {
+              const qualification = await response.json();
+              qualifications[file.name] = qualification;
+              console.log(`[Effect 3] ${file.name} qualified: ${qualification.acceptance_status}`);
+            } else {
+              const errorText = await response.text();
+              console.error(`[Effect 3] Failed (${response.status}): ${errorText}`);
+            }
+          } catch (err) {
+            console.error(`[Effect 3] Error qualifying ${file.name}:`, err);
+          }
+        }
+
+        console.log('[Effect 3] Qualifications completed:', Object.keys(qualifications).length);
+        if (!cancelled && Object.keys(qualifications).length > 0) {
+          console.log('[Effect 3] Setting state with qualifications');
+          setDatasetQualifications(qualifications);
+        }
+      } catch (err) {
+        console.error('[Effect 3] Error:', err);
+      }
+    };
+
+    // Only run after files are uploaded
+    qualifyDatasets();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [datasetFiles, projectId, phase, serverPaths, isUploadingToServer]);
 
   const resetFile = () => {
     setSasFile(null);
@@ -906,10 +1076,10 @@ const UploadStep: React.FC = () => {
   };
 
   // ── Risk level chip helper ─────────────────────────────────
-  const riskChip = (level: 'low' | 'medium' | 'high') => {
-    const map = { low: 'bg-emerald-100 text-emerald-700', medium: 'bg-amber-100 text-amber-700', high: 'bg-red-100 text-red-700' };
-    return <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${map[level]}`}>{level} risk</span>;
-  };
+  // const riskChip = (level: 'low' | 'medium' | 'high') => {
+  //   const map = { low: 'bg-emerald-100 text-emerald-700', medium: 'bg-amber-100 text-amber-700', high: 'bg-red-100 text-red-700' };
+  //   return <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${map[level]}`}>{level} risk</span>;
+  // };
 
   return (
     <>
@@ -1013,72 +1183,96 @@ const UploadStep: React.FC = () => {
                   </button>
                 </div>
 
-                {/* Complexity + Constructs */}
+                {/* Complexity + Program Metadata (AI-Powered) */}
                 <div className="grid grid-cols-2 gap-4">
-                  {/* Complexity card */}
+                  {/* Complexity card - AI powered */}
                   <div className="rounded-xl border border-slate-200 p-4 bg-white">
                     <div className="flex items-center gap-2 mb-2">
                       <Cpu className="w-4 h-4 text-slate-500" />
                       <span className="text-xs font-bold text-slate-600 uppercase tracking-wide">Complexity</span>
+                      {aiAnalysis && <span className="text-[10px] bg-blue-100 text-[#1f4368] px-1.5 py-0.5 rounded font-semibold">AI</span>}
                     </div>
                     <div className="flex items-center gap-2 mb-1.5">
-                      <span className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-sm font-extrabold border ${report.complexity.badge}`}>
-                        Level {report.complexity.level} · {report.complexity.label}
+                      <span className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-sm font-extrabold border ${
+                        aiAnalysis ? (
+                          aiAnalysis.complexity.overall.level === 5 ? 'bg-red-100 text-red-700 border-red-200' :
+                          aiAnalysis.complexity.overall.level === 4 ? 'bg-orange-100 text-orange-700 border-orange-200' :
+                          aiAnalysis.complexity.overall.level === 3 ? 'bg-purple-100 text-purple-700 border-purple-200' :
+                          aiAnalysis.complexity.overall.level === 2 ? 'bg-blue-100 text-[#1a3050] border-blue-200' :
+                          'bg-emerald-100 text-emerald-700 border-emerald-200'
+                        ) : report.complexity.badge
+                      }`}>
+                        Level {aiAnalysis ? aiAnalysis.complexity.overall.level : report.complexity.level} · {aiAnalysis ? ['Basic','Intermediate','Advanced','Contextual Clinical','Highly Contextual'][aiAnalysis.complexity.overall.level-1] : report.complexity.label}
                       </span>
                     </div>
-                    <p className="text-[11px] text-slate-500 leading-relaxed">{report.complexity.description}</p>
-                    <p className="text-[10px] text-slate-400 mt-1">Score: {report.complexity.score}</p>
+                    <p className="text-[11px] text-slate-500 leading-relaxed">
+                      {aiAnalysis?.complexity?.overall?.reasoning || report.complexity.description}
+                    </p>
+                    <p className="text-[10px] text-slate-400 mt-1">Score: {aiAnalysis ? aiAnalysis.complexity.overall.score.toFixed(1) : report.complexity.score}</p>
                   </div>
 
-                  {/* Metadata card */}
+                  {/* Metadata card - AI powered */}
                   <div className="rounded-xl border border-slate-200 p-4 bg-white">
                     <div className="flex items-center gap-2 mb-2">
                       <ClipboardList className="w-4 h-4 text-slate-500" />
                       <span className="text-xs font-bold text-slate-600 uppercase tracking-wide">Program Metadata</span>
+                      {aiAnalysis && <span className="text-[10px] bg-blue-100 text-[#1f4368] px-1.5 py-0.5 rounded font-semibold">AI</span>}
                     </div>
                     <div className="space-y-1 text-xs text-slate-600">
                       <div className="flex justify-between">
                         <span>PROC Categories</span>
-                        <span className="font-semibold">{report.procCategories.length > 0 ? report.procCategories.length + ' detected' : 'None'}</span>
+                        <span className="font-semibold">{aiAnalysis ? aiAnalysis.complexity.categories.proc.count : report.procCategories.length > 0 ? report.procCategories.length + ' detected' : 'None'}</span>
                       </div>
                       <div className="flex justify-between">
                         <span>Macro Usage</span>
-                        <span className={`font-semibold ${report.macroUsage ? 'text-amber-600' : 'text-emerald-600'}`}>{report.macroUsage ? 'Yes' : 'No'}</span>
+                        <span className={`font-semibold ${aiAnalysis ? (aiAnalysis.complexity.categories.macro.count > 0 ? 'text-amber-600' : 'text-emerald-600') : (report.macroUsage ? 'text-amber-600' : 'text-emerald-600')}`}>
+                          {aiAnalysis ? (aiAnalysis.complexity.categories.macro.count > 0 ? 'Yes' : 'No') : (report.macroUsage ? 'Yes' : 'No')}
+                        </span>
                       </div>
                       <div className="flex justify-between">
                         <span>Clinical Indicators</span>
-                        <span className="font-semibold">{report.clinicalDomainIndicators.length}</span>
+                        <span className="font-semibold">{aiAnalysis ? aiAnalysis.complexity.categories.clinical.count : report.clinicalDomainIndicators.length}</span>
                       </div>
                       <div className="flex justify-between">
                         <span>SDTM/ADaM Refs</span>
-                        <span className="font-semibold">{report.sdtmAdamIndicators.length}</span>
+                        <span className="font-semibold">{aiAnalysis ? aiAnalysis.complexity.categories.clinical.count : report.sdtmAdamIndicators.length}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span>Syntax Risk</span>
-                        {riskChip(report.syntaxRiskLevel)}
+                        <span>Syntax Issues</span>
+                        <span className={`font-semibold ${aiAnalysis && aiAnalysis.complexity.categories.syntax.count > 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                          {aiAnalysis ? aiAnalysis.complexity.categories.syntax.count : (report.syntaxRiskLevel === 'high' ? 'High' : report.syntaxRiskLevel === 'medium' ? 'Medium' : 'Low')}
+                        </span>
                       </div>
                     </div>
                   </div>
                 </div>
 
-                {/* Detected Constructs */}
-                {report.constructs.length > 0 && (
+                {/* Detected SAS Constructs - AI Powered */}
+                {((aiAnalysis && aiAnalysis.complexity.constructs && aiAnalysis.complexity.constructs.length > 0) ||
+                  (report.constructs && report.constructs.length > 0)) && (
                   <div className="rounded-xl border border-slate-200 p-4 bg-white">
-                    <p className="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2.5">Detected SAS Constructs</p>
+                    <div className="flex items-center gap-2 mb-2.5">
+                      <p className="text-xs font-bold text-slate-600 uppercase tracking-wide">Detected SAS Constructs</p>
+                      {aiAnalysis && <span className="text-[10px] bg-blue-100 text-[#1f4368] px-1.5 py-0.5 rounded font-semibold">AI</span>}
+                    </div>
                     <div className="flex flex-wrap gap-1.5">
-                      {report.constructs.map(c => (
+                      {(aiAnalysis ? aiAnalysis.complexity.constructs : report.constructs).map((c: string) => (
                         <span key={c} className="text-[11px] bg-slate-100 text-slate-600 px-2.5 py-1 rounded-full font-medium">{c}</span>
                       ))}
                     </div>
                   </div>
                 )}
 
-                {/* Clinical Indicators */}
-                {report.clinicalDomainIndicators.length > 0 && (
+                {/* Clinical Domain Indicators - AI Powered */}
+                {((aiAnalysis && aiAnalysis.complexity.clinical_indicators && aiAnalysis.complexity.clinical_indicators.length > 0) ||
+                  (report.clinicalDomainIndicators && report.clinicalDomainIndicators.length > 0)) && (
                   <div className="rounded-xl border border-blue-100 bg-[#eef3f8]/40 p-4">
-                    <p className="text-xs font-bold text-[#1a3050] uppercase tracking-wide mb-2">Clinical Domain Indicators</p>
+                    <div className="flex items-center gap-2 mb-2">
+                      <p className="text-xs font-bold text-[#1a3050] uppercase tracking-wide">Clinical Domain Indicators</p>
+                      {aiAnalysis && <span className="text-[10px] bg-blue-100 text-[#1f4368] px-1.5 py-0.5 rounded font-semibold">AI</span>}
+                    </div>
                     <div className="flex flex-wrap gap-1.5">
-                      {report.clinicalDomainIndicators.map(c => (
+                      {(aiAnalysis ? aiAnalysis.complexity.clinical_indicators : report.clinicalDomainIndicators).map((c: string) => (
                         <span key={c} className="text-[11px] bg-blue-100 text-[#1a3050] px-2.5 py-1 rounded-full font-medium">{c}</span>
                       ))}
                     </div>
@@ -1178,6 +1372,119 @@ const UploadStep: React.FC = () => {
                   </div>
                 </div>
 
+                {/* AI Auto-Fix Results */}
+                {autoFixResults && (
+                  <div className="rounded-xl border border-slate-200 overflow-hidden">
+                    <div className="px-4 py-3 bg-slate-50 border-b border-slate-200">
+                      <p className="text-xs font-bold text-slate-600 uppercase tracking-wide">🤖 AI Auto-Fix Analysis</p>
+                    </div>
+                    <div className="divide-y divide-slate-100">
+
+                      {/* Tier 1: Auto-Applied Fixes */}
+                      {autoFixResults.tier1_fixes && autoFixResults.tier1_fixes.length > 0 && (
+                        <div className="px-4 py-3">
+                          <div className="flex items-center gap-2 mb-2">
+                            <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                            <span className="text-sm font-semibold text-emerald-700">Auto-Fixes Applied</span>
+                            <span className="text-xs font-semibold text-emerald-600 ml-auto">{autoFixResults.tier1_fixes.length}</span>
+                          </div>
+                          <div className="space-y-1.5 ml-6">
+                            {autoFixResults.tier1_fixes.slice(0, 3).map((fix: any, idx: number) => (
+                              <div key={idx} className="text-xs text-slate-600">
+                                <span className="font-mono bg-emerald-50 px-2 py-1 rounded text-[10px]">Line {fix.line_number}</span>
+                                <span className="ml-2">{fix.message}</span>
+                              </div>
+                            ))}
+                            {autoFixResults.tier1_fixes.length > 3 && (
+                              <p className="text-xs text-slate-400 mt-1">+{autoFixResults.tier1_fixes.length - 3} more auto-fixes</p>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Tier 2: Suggestions (with consent) */}
+                      {autoFixResults.tier2_suggestions && autoFixResults.tier2_suggestions.length > 0 && (
+                        <div className="px-4 py-3">
+                          <div className="flex items-center gap-2 mb-3">
+                            <Wrench className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                            <span className="text-sm font-semibold text-amber-700">Suggested Fixes</span>
+                            <span className="text-xs font-semibold text-amber-600 ml-auto">{autoFixResults.tier2_suggestions.length}</span>
+                          </div>
+                          <div className="space-y-2.5 ml-6">
+                            {autoFixResults.tier2_suggestions.map((suggestion: any, idx: number) => (
+                              <div key={idx} className="bg-amber-50 border border-amber-100 rounded-lg p-2.5 text-xs space-y-1">
+                                <div className="flex items-start justify-between">
+                                  <div>
+                                    <p className="font-mono text-amber-700">Line {suggestion.line_number}</p>
+                                    <p className="font-semibold text-slate-700 mt-0.5">{suggestion.message}</p>
+                                    <p className="text-slate-600 mt-1">{suggestion.explanation}</p>
+                                    <p className="text-amber-600 mt-1">Confidence: {(suggestion.confidence * 100).toFixed(0)}%</p>
+                                  </div>
+                                  <div className="flex gap-1.5 flex-shrink-0">
+                                    <button
+                                      onClick={() => setAppliedTier2Fixes(prev => new Set([...prev, idx]))}
+                                      disabled={appliedTier2Fixes.has(idx)}
+                                      className={`px-2 py-1 rounded text-[10px] font-bold ${
+                                        appliedTier2Fixes.has(idx)
+                                          ? 'bg-emerald-100 text-emerald-700'
+                                          : 'bg-amber-200 hover:bg-amber-300 text-amber-900'
+                                      }`}
+                                    >
+                                      ✓ Apply
+                                    </button>
+                                    <button
+                                      onClick={() => setAppliedTier2Fixes(prev => {
+                                        const next = new Set(prev);
+                                        next.delete(idx);
+                                        return next;
+                                      })}
+                                      className="px-2 py-1 rounded text-[10px] font-bold bg-slate-200 hover:bg-slate-300 text-slate-700"
+                                    >
+                                      Skip
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Tier 3: Issues (must fix manually) */}
+                      {autoFixResults.tier3_issues && autoFixResults.tier3_issues.length > 0 && (
+                        <div className="px-4 py-3">
+                          <div className="flex items-center gap-2 mb-3">
+                            <ShieldAlert className="w-4 h-4 text-red-600 flex-shrink-0" />
+                            <span className="text-sm font-semibold text-red-700">Manual Fix Required</span>
+                            <span className="text-xs font-semibold text-red-600 ml-auto">{autoFixResults.tier3_issues.length}</span>
+                          </div>
+                          <div className="space-y-2 ml-6">
+                            {autoFixResults.tier3_issues.map((issue: any, idx: number) => (
+                              <div key={idx} className="bg-red-50 border border-red-100 rounded-lg p-2.5 text-xs space-y-0.5">
+                                <p className="font-mono text-red-700 font-semibold">Line {issue.line_number}</p>
+                                <p className="font-semibold text-slate-700">{issue.message}</p>
+                                <p className="text-slate-600">{issue.explanation}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* No issues found */}
+                      {(!autoFixResults.tier1_fixes || autoFixResults.tier1_fixes.length === 0) &&
+                       (!autoFixResults.tier2_suggestions || autoFixResults.tier2_suggestions.length === 0) &&
+                       (!autoFixResults.tier3_issues || autoFixResults.tier3_issues.length === 0) && (
+                        <div className="px-4 py-3">
+                          <div className="flex items-center gap-2 text-emerald-700">
+                            <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+                            <span className="text-sm font-semibold">No auto-fix issues detected</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 {/* Conversion Readiness Report */}
                 <div className={`rounded-xl border p-5 ${
                   report.overallStatus === 'manual_review_required'
@@ -1235,72 +1542,274 @@ const UploadStep: React.FC = () => {
           </div>
         </div>
 
-        {/* ── Dependency Analysis Panel ── */}
-        {depAnalysis && (phase === 'done' || phase === 'blocked') && (
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-3">
-              <FileSearch className="w-4 h-4 text-[#1f4368]" />
-              <p className="text-sm font-bold text-slate-800">Dependency Analysis</p>
-              <span className={`ml-auto text-xs font-semibold px-2.5 py-0.5 rounded-full border ${
-                depAnalysis.selfContained
-                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                  : 'bg-amber-50 text-amber-700 border-amber-200'
-              }`}>
-                {depAnalysis.selfContained ? 'Self-Contained' : `${depAnalysis.required.length} Input${depAnalysis.required.length !== 1 ? 's' : ''} Required`}
-              </span>
+
+        {/* ── DEBUG: Show qualification state ── */}
+        {datasetFiles.length > 0 && (
+          <div className="bg-gray-100 border border-gray-300 rounded p-3 text-xs font-mono mb-4">
+            <p className="font-bold mb-2">🔍 DEBUG - Qualification Status:</p>
+            <p>datasetFiles: {datasetFiles.length} file(s)</p>
+            <p>datasetQualifications: {Object.keys(datasetQualifications).length} qualified</p>
+            <p>isUploadingToServer: {isUploadingToServer ? 'true' : 'false'}</p>
+            <p>serverPaths: {Object.keys(serverPaths).length} path(s)</p>
+            <p>phase: {phase}</p>
+            {datasetFiles.map(f => (
+              <p key={f.name}>  • {f.name}: uploaded={!!serverPaths[f.name]}, qualified={!!datasetQualifications[f.name]}</p>
+            ))}
+          </div>
+        )}
+
+        {/* ── UNIFIED DEPENDENCY ANALYZER ── */}
+        {(depIntelligenceV2 || enhancedDepAnalysis) && (phase === 'done' || phase === 'blocked') && (
+          <DependencyAnalyzer
+            v2Data={depIntelligenceV2}
+            enhancedData={enhancedDepAnalysis}
+            qualifications={datasetQualifications}
+          />
+        )}
+
+        {/* Dataset Qualification now integrated into unified DependencyAnalyzer above */}
+
+        {/* ── OLD PANEL REMOVED - Dataset Qualification & Intelligence now in DependencyAnalyzer ── */}
+        {false && (
+          <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl border border-blue-200 shadow-sm overflow-hidden">
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-blue-100 flex items-center gap-3">
+              <Shield className="w-4 h-4 text-[#1f4368]" />
+              <div className="flex-1">
+                <p className="text-sm font-bold text-slate-800">Dataset Qualification & Intelligence</p>
+                <p className="text-xs text-slate-500">AI-powered validation, compatibility analysis, and recommendations</p>
+              </div>
             </div>
 
-            <div className="p-5">
-              {depAnalysis.selfContained ? (
-                <div className="flex items-center gap-3 p-4 bg-emerald-50 rounded-xl border border-emerald-100">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-600 flex-shrink-0" />
-                  <div>
-                    <p className="text-sm font-semibold text-emerald-800">No additional files required</p>
-                    <p className="text-xs text-emerald-600 mt-0.5">Program contains all source data internally (DATALINES / DATA step).</p>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  <p className="text-xs text-slate-500 mb-1">The following external inputs were detected. Upload them below to ensure accurate translation and execution.</p>
-                  {depAnalysis.required.map((dep, i) => {
-                    const matched = datasetFiles.find(
-                      f => f.name.replace(/\.[^.]+$/, '').toLowerCase() === dep.name.replace(/^.*\./, '').replace(/\.[^.]+$/, '').toLowerCase()
-                        || f.name.toLowerCase() === dep.name.toLowerCase()
-                    );
-                    return (
-                      <div key={i} className={`flex items-center gap-3 p-3.5 rounded-xl border ${matched ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200'}`}>
-                        {dep.type === 'dataset'
-                          ? <Database className="w-4 h-4 flex-shrink-0 text-[#1f4368]" />
-                          : <File className="w-4 h-4 flex-shrink-0 text-purple-500" />
-                        }
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-bold text-slate-800">{dep.name}</p>
-                          {dep.rawPath && <p className="text-[10px] text-slate-400 truncate">Original path: {dep.rawPath}</p>}
-                          <span className={`text-[10px] font-semibold uppercase ${dep.type === 'dataset' ? 'text-[#1f4368]' : 'text-purple-600'}`}>{dep.type}</span>
-                        </div>
-                        {matched
-                          ? <span className="flex items-center gap-1 text-xs font-semibold text-emerald-700"><PackageCheck className="w-4 h-4" /> Matched</span>
-                          : <span className="flex items-center gap-1 text-xs font-semibold text-amber-700"><PackageX className="w-4 h-4" /> Missing</span>
-                        }
-                      </div>
-                    );
-                  })}
+            <div className="p-5 space-y-4">
+              {/* Dataset Cards - Loop through each qualified dataset */}
+              {datasetFiles.map((file, idx) => {
+                const qual = datasetQualifications[file.name];
+                if (!qual) return null;
 
-                  {/* Summary */}
-                  <div className="grid grid-cols-3 gap-3 mt-1">
-                    {[
-                      { label: 'Required',  val: depAnalysis.required.length,    color: 'text-slate-700' },
-                      { label: 'Uploaded',  val: datasetFiles.length,             color: 'text-[#1f4368]' },
-                      { label: 'Missing',   val: Math.max(0, depAnalysis.required.length - datasetFiles.length), color: 'text-amber-600' },
-                    ].map(({ label, val, color }) => (
-                      <div key={label} className="text-center bg-slate-50 rounded-lg py-2.5">
-                        <p className={`text-lg font-extrabold ${color}`}>{val}</p>
-                        <p className="text-[10px] text-slate-500 uppercase tracking-wide">{label}</p>
+                const acceptanceColor = {
+                  accepted: 'bg-emerald-50 border-emerald-200',
+                  accepted_with_warning: 'bg-amber-50 border-amber-200',
+                  needs_review: 'bg-orange-50 border-orange-200',
+                  rejected: 'bg-red-50 border-red-200',
+                };
+
+                return (
+                  <div key={idx} className={`rounded-lg border ${acceptanceColor[qual.acceptance_status as keyof typeof acceptanceColor] || 'bg-slate-50 border-slate-200'}`}>
+                    {/* Dataset Header */}
+                    <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-1">
+                          <p className="text-sm font-bold text-slate-800">{file.name}</p>
+                          <span className="text-xs font-semibold bg-slate-200 text-slate-700 px-2 py-0.5 rounded">{qual.dataset_type}</span>
+                          <span className={`text-xs font-semibold px-2 py-0.5 rounded ${
+                            qual.acceptance_status === 'accepted' ? 'bg-emerald-200 text-emerald-700' :
+                            qual.acceptance_status === 'accepted_with_warning' ? 'bg-amber-200 text-amber-700' :
+                            qual.acceptance_status === 'needs_review' ? 'bg-orange-200 text-orange-700' :
+                            'bg-red-200 text-red-700'
+                          }`}>
+                            {qual.acceptance_status.replace(/_/g, ' ')}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-600">{qual.metadata.row_count} rows · {qual.metadata.column_count} columns</p>
                       </div>
-                    ))}
+
+                      {/* Compatibility Score Display */}
+                      <div className="flex flex-col items-end gap-2">
+                        <div className="text-right">
+                          <p className="text-2xl font-bold text-slate-800">{qual.compatibility_score.overall}%</p>
+                          <p className="text-[10px] text-slate-600">Compatibility</p>
+                        </div>
+                        {qual.compatibility_score.translation_ready && (
+                          <span className="text-xs font-semibold text-emerald-600 bg-emerald-100 px-2 py-0.5 rounded">✓ Translation Ready</span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Compatibility Score Breakdown */}
+                    <div className="p-4 border-b border-slate-200 bg-white bg-opacity-50">
+                      <div className="grid grid-cols-3 gap-2 text-center text-[10px]">
+                        <div>
+                          <p className="font-bold text-slate-800">{qual.compatibility_score.structure}%</p>
+                          <p className="text-slate-600">Structure</p>
+                        </div>
+                        <div>
+                          <p className="font-bold text-slate-800">{qual.compatibility_score.variables}%</p>
+                          <p className="text-slate-600">Variables</p>
+                        </div>
+                        <div>
+                          <p className="font-bold text-slate-800">{qual.compatibility_score.relationships}%</p>
+                          <p className="text-slate-600">Relationships</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Detailed Analysis Sections (Collapsible) */}
+                    <div className="p-4 space-y-3">
+
+                      {/* Missing Variables & Variable Mapping */}
+                      {((qual.structure?.missing_variables || []).length > 0 || (qual.variable_mappings || []).length > 0) && (
+                        <div className="border border-slate-200 rounded-lg overflow-hidden">
+                          <button
+                            onClick={() => setExpandedQualSection(expandedQualSection === `${file.name}-variables` ? null : `${file.name}-variables`)}
+                            className="w-full p-3 flex items-center justify-between bg-slate-50 hover:bg-slate-100 transition-colors"
+                          >
+                            <span className="text-xs font-bold text-slate-700">
+                              Variable Intelligence ({(qual.structure?.missing_variables || []).length} missing, {(qual.variable_mappings || []).length} suggestions)
+                            </span>
+                            <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${expandedQualSection === `${file.name}-variables` ? 'rotate-180' : ''}`} />
+                          </button>
+                          {expandedQualSection === `${file.name}-variables` && (
+                            <div className="p-3 space-y-3 border-t border-slate-200 bg-white">
+                              {/* Missing Variables */}
+                              {(qual.structure?.missing_variables || []).length > 0 && (
+                                <div>
+                                  <p className="text-[10px] font-bold text-slate-700 mb-2">Missing Variables</p>
+                                  <div className="space-y-1">
+                                    {(qual.structure?.missing_variables || []).map((varName: string, i: number) => (
+                                      <div key={i} className="text-[10px] p-2 bg-amber-50 border border-amber-200 rounded text-amber-700">
+                                        <span>⚠️ {varName}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* AI Variable Mapping Suggestions */}
+                              {(qual.variable_mappings || []).length > 0 && (
+                                <div>
+                                  <p className="text-[10px] font-bold text-slate-700 mb-2">AI Suggested Mappings</p>
+                                  <div className="space-y-2">
+                                    {(qual.variable_mappings || []).map((mapping: any, i: number) => (
+                                      <div key={i} className="p-2 bg-blue-50 border border-blue-200 rounded">
+                                        <div className="flex items-center justify-between text-[10px] mb-1">
+                                          <span><strong>{mapping.original_var}</strong> → <strong>{mapping.suggested_var}</strong></span>
+                                          <span className="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-bold">{(mapping.confidence * 100).toFixed(0)}%</span>
+                                        </div>
+                                        <p className="text-[9px] text-slate-600">{mapping.reason}</p>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Duplicates & Missing Values */}
+                      {((qual.duplicates?.duplicate_rows || 0) > 0 || (qual.missing_values || []).length > 0) && (
+                        <div className="border border-slate-200 rounded-lg overflow-hidden">
+                          <button
+                            onClick={() => setExpandedQualSection(expandedQualSection === `${file.name}-quality` ? null : `${file.name}-quality`)}
+                            className="w-full p-3 flex items-center justify-between bg-slate-50 hover:bg-slate-100 transition-colors"
+                          >
+                            <span className="text-xs font-bold text-slate-700">Data Quality Issues</span>
+                            <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${expandedQualSection === `${file.name}-quality` ? 'rotate-180' : ''}`} />
+                          </button>
+                          {expandedQualSection === `${file.name}-quality` && (
+                            <div className="p-3 space-y-3 border-t border-slate-200 bg-white">
+                              {/* Duplicates */}
+                              {(qual.duplicates?.duplicate_rows || 0) > 0 && (
+                                <div className="p-2 bg-orange-50 border border-orange-200 rounded text-[10px]">
+                                  <p className="font-bold text-orange-700 mb-1">⚠️ Duplicate Rows Detected</p>
+                                  <p className="text-orange-600">{qual.duplicates.duplicate_rows} rows ({(qual.duplicates.duplicate_pct || 0).toFixed(1)}%)</p>
+                                </div>
+                              )}
+
+                              {/* Missing Values */}
+                              {(qual.missing_values || []).length > 0 && (
+                                <div>
+                                  <p className="text-[10px] font-bold text-slate-700 mb-2">Missing Values</p>
+                                  <div className="space-y-1">
+                                    {(qual.missing_values || []).map((mv: any, i: number) => (
+                                      <div key={i} className="text-[9px] p-2 bg-slate-50 border border-slate-200 rounded">
+                                        <div className="flex items-center justify-between mb-1">
+                                          <strong>{mv.variable}</strong>
+                                          <span className={`px-1.5 py-0.5 rounded font-bold ${
+                                            mv.clinical_criticality === 'high' ? 'bg-red-100 text-red-700' :
+                                            mv.clinical_criticality === 'medium' ? 'bg-amber-100 text-amber-700' :
+                                            'bg-slate-100 text-slate-700'
+                                          }`}>{mv.missing_pct.toFixed(1)}%</span>
+                                        </div>
+                                        <p className="text-slate-600">Rec: <strong>{mv.recommended_strategy}</strong> – {mv.reason}</p>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Recommendations */}
+                      {qual.recommendations.length > 0 && (
+                        <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                          <p className="text-xs font-bold text-blue-700 mb-2">AI Recommendations</p>
+                          <ul className="space-y-1">
+                            {qual.recommendations.map((rec: string, i: number) => (
+                              <li key={i} className="text-[10px] text-blue-600 flex items-start gap-2">
+                                <span>💡</span>
+                                <span>{rec}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ── Translation Impact Analysis Panel ── */}
+        {datasetFiles.length > 0 && Object.keys(datasetQualifications).length > 0 && (
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden p-6 mb-4">
+            <h3 className="text-sm font-bold text-slate-800 mb-3 flex items-center gap-2">
+              <TrendingUp className="w-4 h-4 text-blue-600" />
+              Translation Impact Analysis
+            </h3>
+            <p className="text-xs text-slate-500 mb-4">
+              Analyzes how the qualified dataset affects the downstream multi-agent compilation pipeline.
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center">
+                <p className="text-xs font-semibold text-slate-600">Parser Readiness</p>
+                <span className="inline-block mt-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                  Ready
+                </span>
+              </div>
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center">
+                <p className="text-xs font-semibold text-slate-600">Intent Analysis</p>
+                <span className="inline-block mt-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                  Ready
+                </span>
+              </div>
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center">
+                <p className="text-xs font-semibold text-slate-600">Execution Flow</p>
+                <span className="inline-block mt-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                  Ready
+                </span>
+              </div>
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center">
+                <p className="text-xs font-semibold text-slate-600">Package Recs</p>
+                <span className="inline-block mt-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                  Ready
+                </span>
+              </div>
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center">
+                <p className="text-xs font-semibold text-slate-600">Translation Readiness</p>
+                <span className={`inline-block mt-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
+                  Object.values(datasetQualifications).every(q => q.compatibility_score?.translation_ready)
+                    ? 'bg-emerald-100 text-emerald-800'
+                    : 'bg-amber-100 text-amber-800'
+                }`}>
+                  {Math.round(Object.values(datasetQualifications).reduce((acc, q) => acc + (q.compatibility_score?.overall ?? 0), 0) / Object.keys(datasetQualifications).length)}%
+                </span>
+              </div>
             </div>
           </div>
         )}
