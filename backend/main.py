@@ -683,9 +683,14 @@ def execute_r_code(r_code: str) -> Dict[str, Any]:
 
     tmp = None
     try:
+        # Prepend non-interactive options and mock install.packages to prevent hangs during validation
+        preamble = (
+            "options(repos = c(CRAN = 'https://cloud.r-project.org'))\n"
+            "install.packages <- function(...) { invisible(NULL) }\n\n"
+        )
         with tempfile.NamedTemporaryFile(
                 suffix='.R', mode='w', delete=False, encoding='utf-8') as f:
-            f.write(r_code)
+            f.write(preamble + r_code)
             tmp = f.name
 
         # Use --no-save --no-restore (not --vanilla) so the user R library

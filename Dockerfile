@@ -20,6 +20,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     r-base \
     r-cran-dplyr \
     r-cran-tidyr \
+    r-cran-stringr \
+    r-cran-lubridate \
+    r-cran-haven \
+    r-cran-readxl \
+    r-cran-ggplot2 \
+    r-cran-survival \
     && rm -rf /var/lib/apt/lists/*
 
 # Verify R is available
@@ -30,6 +36,7 @@ COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 
 # Copy application code
+COPY app/ /app/app/
 COPY backend/ /app/backend/
 
 # Copy built frontend assets
